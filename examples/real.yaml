@@ -1,0 +1,18 @@
+# Live data: Open-Meteo (weather, no key) + Yahoo (stocks, no key). Results cache to .cache/.
+seed: 11
+agents: 300
+canvas: {width: 297, height: 210, margin: 10}
+energy_range: [40, 350]
+
+signals:
+  spy_volume: {provider: yahoo, symbol: SPY, field: volume, start: "2025-10-01", end: "2026-10-01"}
+  spy_return: {provider: yahoo, symbol: SPY, field: return, start: "2025-10-01", end: "2026-10-01"}
+  nyc_temp:   {provider: open_meteo, lat: 40.71, lon: -74.01, variable: temperature_2m,
+               start: "2026-09-01", end: "2026-09-30"}
+
+bind:
+  x:      {signal: spy_volume, scale: rank}
+  y:      {signal: nyc_temp}
+  energy: {signal: spy_return, scale: rank}
+
+species_file: species.yaml   # path relative to this config

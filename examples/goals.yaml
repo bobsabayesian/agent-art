@@ -1,0 +1,50 @@
+# Every agent traces a goal shape; noise, neighbors and walls bend it.
+seed: 5
+agents: 120
+canvas: {width: 297, height: 210, margin: 25}
+energy_range: [200, 900]
+signals:
+  vol:  {provider: synthetic, kind: walk, seed: 1, label: fake volume}
+  temp: {provider: synthetic, kind: sine, period: 40, label: fake temperature}
+bind:
+  x: {signal: vol}
+  y: {signal: temp}
+species:
+  - name: roundish
+    pen: black
+    color: "#111111"
+    weight: 2
+    goal: [circle, figure8, heart]
+    goal_size: [10, 22]
+    goal_strength: [0.7, 0.95]
+    turn_propensity: [0.1, 0.3]
+    step: [1.0, 1.6]
+    momentum_decay: 0.9995
+    min_step: 0.3
+    thickness: 0.3
+    affinity_other: -0.2
+  - name: angular
+    pen: red
+    color: "#c0392b"
+    weight: 2
+    goal: [square, triangle, star, hexagon]
+    goal_size: [8, 18]
+    goal_strength: [0.5, 0.9]
+    turn_propensity: [0.1, 0.4]
+    jitter: [0, 0.15]
+    step: [1.0, 1.6]
+    momentum_decay: 0.9995
+    min_step: 0.3
+    thickness: 0.4
+  - name: wanderer
+    pen: blue
+    color: "#1f4e9c"
+    goal: [spiral, wave, line]
+    goal_size: [10, 25]
+    goal_strength: 0.8
+    like_x: 0.5
+    turn_propensity: 0.15
+    step: [1.5, 2.5]
+    momentum_decay: 0.999
+    min_step: 0.3
+    thickness: 0.25
