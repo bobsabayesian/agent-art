@@ -44,7 +44,7 @@ sessions/<session-id>/exports/<utc-timestamp>-s<seed>.config.json (+ .svg)  ever
 cache/signals/<hash>.json                                                    fetched stock/weather series (Refresh data bypasses it)
 ```
 
-A session id (`YYYYMMDD-HHMMSS-xxxx`, UTC) is created per browser tab and kept across reloads. Click the id chip to copy it, shift-click for a new session. Autosave writes the config and SVG once you stop changing things for 4 s (uncheck "autosave" to turn it off); **History** lists a session's saves and reloads any config.
+A session id (`YYYYMMDD-HHMMSS-xxxx`, UTC) is created per browser tab and kept across reloads. Click the id chip to copy it, shift-click for a new session. Autosave writes the config and SVG once you stop changing things for 4 s (uncheck "autosave" to turn it off);
 
 ### One-time setup
 

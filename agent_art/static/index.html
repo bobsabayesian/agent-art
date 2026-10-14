@@ -48,14 +48,9 @@
   .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:4px; vertical-align:-1px; }
   .busy { opacity:.55; }
   #session-ui { display:flex; gap:8px; align-items:center; }
-  #session-ui[hidden], #history[hidden] { display:none; }
+  #session-ui[hidden] { display:none; }
   #session-chip { font:11px ui-monospace, monospace; color:var(--mute); }
   #save-note { font-size:11px; color:var(--mute); }
-  #history { position:absolute; right:12px; top:52px; width:400px; max-height:70vh; overflow:auto; z-index:5;
-             background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px; box-shadow:0 6px 24px #0004; }
-  #history .item { display:flex; gap:6px; align-items:center; padding:3px 0; border-top:1px solid var(--line); font-size:12px; }
-  #history .item .when { flex:1; min-width:0; }
-  #history .badge { font-size:10px; padding:0 5px; border:1px solid var(--line); border-radius:8px; color:var(--mute); }
   main { position:relative; }
 </style>
 </head>
@@ -74,12 +69,11 @@
     <span id="session-ui" hidden>
       <button id="btn-save" title="Save the current config + SVG to R2 now">Save</button>
       <label title="Save the config + SVG once you stop changing things"><input type="checkbox" id="autosave" checked> autosave</label>
-      <button id="btn-history">History</button>
       <button id="session-chip" title="Session id: click to copy; shift-click for a new session"></button>
     </span>
     <span id="status"></span>
   </div>
-  <div id="history" hidden></div>
+
   <div id="paper"><div class="sheet" id="sheet"></div></div>
   <div id="legend"></div>
 </main>
@@ -851,43 +845,11 @@ function scheduleAutosave() {
   if (!$("#autosave").checked) return;
   clearTimeout(saveTimer); saveTimer = setTimeout(() => saveToR2("run"), 4000);   // once you stop tweaking
 }
-async function openHistory(selected = sessionId) {
-  const panel = $("#history"); panel.hidden = false; panel.textContent = "loading…";
-  try {
-    const {sessions} = await apiFetch("/api/sessions");
-    if (!sessions.includes(sessionId)) sessions.unshift(sessionId);
-    const {objects} = await apiFetch(`/api/sessions/${selected}`);
-    const groups = new Map();   // "folder/base" -> {config, svg}
-    for (const o of objects) {
-      const m = o.key.match(/^sessions\/[^/]+\/(runs|exports)\/(.+)\.(svg|config\.json)$/); if (!m) continue;
-      const g = groups.get(`${m[1]}/${m[2]}`) ?? {kind: m[1], base: m[2]};
-      g[m[3] === "svg" ? "svg" : "config"] = o.key; groups.set(`${m[1]}/${m[2]}`, g);
-    }
-    const sel = el("select", {style: "flex:1"}, sessions.map(id => el("option", {value: id, ...(id === selected ? {selected: true} : {})}, id + (id === sessionId ? "  (this session)" : ""))));
-    sel.addEventListener("change", () => openHistory(sel.value));
-    const url = k => `/api/object?key=${encodeURIComponent(k)}`;
-    const items = [...groups.values()].sort((a, b) => b.base.localeCompare(a.base)).map(g => {
-      const [ts, seed] = [g.base.split("-s")[0], g.base.split("-s")[1]];
-      const when = ts.replace(/^(\d{4}-\d\d-\d\d)T(\d\d)-(\d\d)-(\d\d).*$/, "$1 $2:$3:$4");
-      return el("div", {class: "item"},
-        el("span", {class: "when"}, `${when}  seed ${seed ?? "?"} `, el("span", {class: "badge"}, g.kind === "exports" ? "export" : "run")),
-        g.config ? el("button", {onclick: async () => {
-          try { state = stateFromConfig(await apiFetch(url(g.config))); lastResult = null; renderSide(); run(false); $("#history").hidden = true; }
-          catch (e) { saveNote("could not load: " + e.message, true); }
-        }}, "load") : null,
-        g.svg ? el("a", {href: url(g.svg), target: "_blank", rel: "noopener"}, "svg ↗") : null);
-    });
-    panel.replaceChildren(
-      el("div", {class: "row", style: "margin-top:0"}, el("strong", {}, "History"), sel, el("button", {onclick: () => { panel.hidden = true; }}, "✕")),
-      ...(items.length ? items : [el("div", {class: "meta"}, "Nothing saved in this session yet.")]));
-  } catch (e) { panel.textContent = "Could not load history: " + e.message; }
-}
 function setupWeb() {
   $("#session-ui").hidden = false;
   $("#status").after(el("span", {id: "save-note"}));
   initSession();
   $("#btn-save").onclick = () => saveToR2("run");
-  $("#btn-history").onclick = () => ($("#history").hidden ? openHistory() : ($("#history").hidden = true));
   $("#session-chip").onclick = e => {
     if (e.shiftKey) { sessionId = newSessionId(); try { sessionStorage.setItem(SESSION_KEY, sessionId); } catch {} lastSavedKey = ""; $("#session-chip").textContent = sessionId; saveNote("new session"); }
     else navigator.clipboard?.writeText(sessionId).then(() => saveNote("session id copied"));

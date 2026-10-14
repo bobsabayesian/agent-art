@@ -18,3 +18,6 @@ bucket_name = "agent-art"
 [vars]
 ACCESS_TEAM_DOMAIN = ""
 ACCESS_AUD = ""
+# TEMPORARY: switches the Access check off, so anyone with the workers.dev URL can write to R2.
+# Remove this line once the two values above are filled in.
+ALLOW_UNAUTHENTICATED = "true"
