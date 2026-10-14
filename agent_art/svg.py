@@ -1,6 +1,8 @@
 """SVG writer: one Inkscape-style layer per pen so plotter-utils/vpype can split by pen."""
 from __future__ import annotations
 
+from html import escape
+
 import numpy as np
 
 from .sim import Result
@@ -38,20 +40,25 @@ def to_svg(res: Result, simplify: float = 0.0, background: str | None = None) ->
     ]
     if background:
         out.append(f'<rect width="{w}" height="{h}" fill="{background}"/>')
-    by_pen: dict[str, list[int]] = {}
+    layers: dict[str, list[str]] = {}
     for i, sid in enumerate(res.species_ids):
-        by_pen.setdefault(res.species[sid].pen, []).append(i)
-    for pen, idxs in by_pen.items():
-        out.append(f'<g inkscape:groupmode="layer" inkscape:label="{pen}" id="pen-{pen}" '
+        sp = res.species[sid]
+        p = _rdp(res.paths[i], simplify)
+        if len(p) < 2:
+            continue
+        d = "M" + " L".join(f"{x:.3f},{h - y:.3f}" for x, y in p)  # flip: y up -> SVG y down
+        layers.setdefault(sp.pen, []).append(
+            f'<path d="{d}" stroke="{escape(sp.color)}" stroke-width="{res.thickness[i]:.3f}" '
+            f'data-species="{escape(sp.name)}" data-agent="{i}"/>')
+    if res.border:   # all border pieces in one path (many sub-paths for dotted/striped)
+        b = res.paper.border
+        d = " ".join("M" + " L".join(f"{x:.3f},{h - y:.3f}" for x, y in seg) for seg in res.border)
+        layers.setdefault(b.pen, []).append(
+            f'<path d="{d}" stroke="{escape(b.color)}" stroke-width="{b.width:.3f}" data-border="{b.style}"/>')
+    for pen, items in layers.items():
+        out.append(f'<g inkscape:groupmode="layer" inkscape:label="{escape(pen)}" id="pen-{escape(pen)}" '
                    f'fill="none" stroke-linecap="round" stroke-linejoin="round">')
-        for i in idxs:
-            sp = res.species[res.species_ids[i]]
-            p = _rdp(res.paths[i], simplify)
-            if len(p) < 2:
-                continue
-            d = "M" + " L".join(f"{x:.3f},{h - y:.3f}" for x, y in p)  # flip: y up -> SVG y down
-            out.append(f'<path d="{d}" stroke="{sp.color}" stroke-width="{res.thickness[i]:.3f}" '
-                       f'data-species="{sp.name}" data-agent="{i}"/>')
+        out.extend(items)
         out.append("</g>")
     out.append("</svg>")
     return "\n".join(out) + "\n"

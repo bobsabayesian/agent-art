@@ -1,11 +1,20 @@
-"""Species definitions. Numeric traits may be a number or [lo, hi]; each agent samples its own."""
+"""Species definitions. Each numeric trait is one of:
+  5            fixed value
+  {mean: m, sd: s}   normal around m with standard deviation s, truncated to the trait's valid range
+                     (init_angle wraps around 360 instead). sd 0 = fixed; large sd -> close to uniform.
+  [lo, hi]     uniform between lo and hi (older form, still accepted)
+Each agent draws its own value.
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 
 import numpy as np
 
-Range = "float | list[float]"
+from .server_meta import TRAIT_RANGES
+
+Range = "float | list[float] | dict"
+CIRCULAR = {"init_angle"}
 
 
 @dataclass
@@ -42,11 +51,32 @@ class Species:
         out: dict = {}
         for k in TRAITS:
             v = getattr(self, k)
-            out[k] = float(rng.uniform(v[0], v[1])) if isinstance(v, (list, tuple)) else float(v)
+            out[k] = _draw(k, v, rng)
         goals = [self.goal] if isinstance(self.goal, str) else list(self.goal or [])
         out["goal"] = goals[int(rng.integers(len(goals)))] if goals else None
         out["goal_mirror"] = bool(rng.integers(2)) if goals else False
         return out
+
+
+def _draw(key: str, v, rng: np.random.Generator) -> float:
+    if isinstance(v, dict):
+        extra = set(v) - {"mean", "sd"}
+        if extra or "mean" not in v:
+            raise ValueError(f"trait {key!r}: expected {{mean, sd}}, got keys {sorted(v)}")
+        mean, sd = float(v["mean"]), float(v.get("sd", 0))
+        if sd <= 0:
+            return mean
+        if key in CIRCULAR:
+            return float(rng.normal(mean, sd) % 360)
+        lo, hi = TRAIT_RANGES[key][:2]
+        for _ in range(100):  # truncated normal by rejection
+            x = float(rng.normal(mean, sd))
+            if lo <= x <= hi:
+                return x
+        return min(max(mean, lo), hi)
+    if isinstance(v, (list, tuple)):
+        return float(rng.uniform(v[0], v[1]))
+    return float(v)
 
 
 TRAITS = ("thickness", "like_x", "like_y", "like_total_angle", "init_angle", "turn_propensity",

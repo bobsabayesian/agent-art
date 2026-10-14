@@ -118,3 +118,198 @@ def test_goal_off_is_unchanged_and_unknown_goal_errors():
     assert to_svg(run(CFG)) == to_svg(run(CFG))
     with pytest.raises(ValueError):
         run(_goal_cfg("blob"))
+
+
+def _mod_cfg(**extra):
+    base = {"seed": 2, "agents": 30, "canvas": {"width": 200, "height": 200, "margin": 20},
+            "energy_range": [40, 40],
+            "signals": {"ramp": {"provider": "synthetic", "kind": "sine", "period": 60},
+                        "walk": {"provider": "synthetic", "kind": "walk", "seed": 4}},
+            "species": [{"name": "a", "pen": "k"}, {"name": "b", "pen": "r", "color": "#f00"}]}
+    return base | extra
+
+
+def test_trait_modulation_follows_signal():
+    cfg = _mod_cfg(modulate={"thickness": {"signal": "walk", "span": [0.1, 1.0]}})
+    res = run(cfg)
+    from agent_art.mapping import normalize, resample
+    series = signals.fetch(cfg["signals"]["walk"]).values
+    expect = 0.1 + 0.9 * normalize(resample(np.array(series), 30))
+    assert np.allclose(res.thickness, expect)
+
+
+def test_trait_modulation_species_filter_and_invert():
+    cfg = _mod_cfg(modulate={"thickness": {"signal": "walk", "span": [0.1, 1.0], "species": ["a"], "invert": True}})
+    res = run(cfg)
+    for t, sid in zip(res.thickness, res.species_ids):
+        if res.species[sid].name == "b":
+            assert t == 0.3  # untouched default
+        else:
+            assert 0.1 <= t <= 1.0
+
+
+def test_modulation_keeps_random_stream():
+    base = to_svg(run(_mod_cfg()))
+    same = to_svg(run(_mod_cfg(modulate={}, walk=[])))
+    assert base == same
+
+
+def _straight(**extra):
+    sp = {"name": "s", "init_angle": 0, "turn_propensity": 0, "step": 1.0, "momentum_decay": 1.0, "like_x": 0}
+    return _mod_cfg(species=[sp], agents=1, energy_range=[120, 120],
+                    canvas={"width": 400, "height": 400, "margin": 150}, **extra)
+
+
+def test_walk_heading_driver_makes_path_follow_signal():
+    flat = run(_straight()).paths[0]
+    wavy = run(_straight(walk=[{"signal": "ramp", "target": "heading", "gain": 1.2, "window": 0.5}])).paths[0]
+    assert np.ptp(flat[:, 1]) < 1e-6
+    assert np.ptp(wavy[:, 1]) > 5
+
+
+def test_walk_step_driver_changes_length_of_steps():
+    flat = run(_straight()).paths[0]
+    slow = run(_straight(walk=[{"signal": "ramp", "target": "step", "gain": 0.9, "window": 1.0}])).paths[0]
+    assert len(slow) > len(flat) * 0.9 and len(slow) != len(flat)
+
+
+def test_walk_deterministic_and_window_slides_with_drop_order():
+    cfg = _mod_cfg(agents=6, walk=[{"signal": "walk", "target": "turn", "gain": 0.3, "window": 0.2}])
+    assert to_svg(run(cfg)) == to_svg(run(cfg))
+    from agent_art.mapping import build_drops, load_signals
+    d = build_drops(cfg, 6, np.random.default_rng(0), load_signals(cfg))
+    w = d.walkers[0]
+    first, last = w.profile(0, 6), w.profile(5, 6)
+    series = w.norm
+    assert first[0] == series[0] and last[-1] == series[-1]
+
+
+@pytest.mark.parametrize("bad", [
+    {"modulate": {"nonsense": {"signal": "walk"}}},
+    {"modulate": {"thickness": {"signal": "missing"}}},
+    {"walk": [{"signal": "walk", "target": "sideways"}]},
+    {"walk": [{"signal": "walk", "target": "turn", "window": 0}]},
+    {"walk": [{"signal": "walk", "target": "turn", "start": "later"}]},
+])
+def test_bad_modulation_configs(bad):
+    with pytest.raises(ValueError):
+        run(_mod_cfg(**bad))
+
+
+def _draw_many(key, v, n=4000):
+    from agent_art.species import _draw
+    rng = np.random.default_rng(0)
+    return np.array([_draw(key, v, rng) for _ in range(n)])
+
+
+def test_mean_sd_low_spread_stays_near_mean_and_high_spread_wanders():
+    tight = _draw_many("like_x", {"mean": 0.0, "sd": 0.05})
+    loose = _draw_many("like_x", {"mean": 0.0, "sd": 1.0})
+    assert abs(tight.mean()) < 0.01 and tight.std() < 0.06
+    assert loose.std() > 0.45 and loose.min() >= -1 and loose.max() <= 1  # truncated, near-uniform
+
+
+def test_mean_sd_edge_cases():
+    assert _draw_many("like_x", {"mean": 0.3, "sd": 0}, 5).tolist() == [0.3] * 5
+    a = _draw_many("init_angle", {"mean": 350, "sd": 30})
+    assert a.min() >= 0 and a.max() < 360
+    assert (a < 40).sum() > 200 and (a > 300).sum() > 200  # wraps around 360
+    u = _draw_many("like_x", [0.2, 0.8])  # legacy uniform range still works
+    assert 0.2 <= u.min() and u.max() <= 0.8
+    assert _draw_many("like_x", 0.25, 3).tolist() == [0.25] * 3
+    with pytest.raises(ValueError):
+        _draw_many("like_x", {"mean": 0, "stddev": 1}, 1)
+
+
+def test_species_traits_accept_mean_sd():
+    sp = Species("a", like_x={"mean": 0.5, "sd": 0.01})
+    xs = [sp.sample(np.random.default_rng(i))["like_x"] for i in range(50)]
+    assert abs(np.mean(xs) - 0.5) < 0.02
+
+
+# ---------- paper, margin, border ----------
+from agent_art.paper import SIZES, border_paths, resolve_paper
+
+
+def test_named_sizes_orientation_units():
+    a4 = resolve_paper({"size": "A4"})
+    assert (a4.width, a4.height) == (297, 210)                      # landscape default
+    p = resolve_paper({"size": "a4", "orientation": "portrait"})
+    assert (p.width, p.height) == (210, 297)
+    lt = resolve_paper({"size": "Letter", "orientation": "portrait"})
+    assert (round(lt.width, 1), round(lt.height, 1)) == (215.9, 279.4)
+    assert resolve_paper({"size": "Arch D"}).width == pytest.approx(36 * 25.4)
+    c = resolve_paper({"size": "custom", "unit": "in", "width": 10, "height": 8, "margin": 0.5})
+    assert (c.width, c.height, c.margin) == (254, 203.2, 12.7)
+    legacy = resolve_paper({"width": 297, "height": 210, "margin": 10})  # old configs still mean mm
+    assert (legacy.width, legacy.height, legacy.margin) == (297, 210, 10)
+    assert {"a0", "a4", "letter", "legal", "tabloid", "ansi_d", "arch_e", "8x10in", "30x40cm"} <= set(SIZES)
+
+
+@pytest.mark.parametrize("bad", [
+    {"size": "A99"}, {"size": "A4", "orientation": "sideways"}, {"unit": "ft"},
+    {"width": 100, "height": 100, "margin": 60}, {"border": {"style": "wavy"}},
+    {"border": {"style": "single", "bogus": 1}}, {"border": {"style": "single", "width": 0}},
+    {"width": 100, "height": 100, "margin": 2, "border": {"style": "single", "width": 3}},
+    {"width": 100, "height": 100, "margin": 4, "border": {"style": "double", "width": 1, "gap": 5}},
+])
+def test_bad_canvas(bad):
+    with pytest.raises(ValueError):
+        resolve_paper(bad)
+
+
+def _cfg_margin():
+    return _mod_cfg(canvas={"size": "A5", "margin": 15, "border": {"style": "single", "width": 0.6}},
+                    agents=60, energy_range=[300, 600],
+                    species=[{"name": "a", "thickness": {"mean": 1.2, "sd": 0}, "turn_propensity": 0.3, "step": 2.0, "like_x": 0.8}])
+
+
+@pytest.mark.parametrize("boundary", ["reflect", "stop"])
+def test_nothing_drawn_outside_margin(boundary):
+    res = run(_cfg_margin() | {"boundary": boundary})
+    w, h, m = res.width, res.height, 15
+    lo = m + 1.2 / 2 - 1e-9
+    for p in res.paths:
+        assert (p[:, 0] >= lo).all() and (p[:, 0] <= w - lo).all()
+        assert (p[:, 1] >= lo).all() and (p[:, 1] <= h - lo).all()
+
+
+def test_goal_shapes_also_confined_to_margin():
+    cfg = _cfg_margin()
+    cfg["species"] = [{"name": "g", "goal": "star", "goal_size": 80, "goal_strength": 0.9, "step": 1.5}]
+    res = run(cfg)
+    for p in res.paths:
+        assert (p >= 15).all() and (p[:, 0] <= res.width - 15).all() and (p[:, 1] <= res.height - 15).all()
+
+
+@pytest.mark.parametrize("style,expect", [("single", 1), ("double", 2)])
+def test_line_borders_are_closed_rectangles(style, expect):
+    paper = resolve_paper({"width": 100, "height": 80, "margin": 10, "border": {"style": style}})
+    paths = border_paths(paper)
+    assert len(paths) == expect and all(np.allclose(p[0], p[-1]) for p in paths)
+    allp = np.vstack(paths)
+    assert allp.min() >= 0 and allp[:, 0].max() <= 100 and allp[:, 1].max() <= 80
+    if style == "double":  # two nested rectangles
+        assert np.ptp(paths[0][:, 0]) > np.ptp(paths[1][:, 0])
+
+
+def test_dotted_and_striped_borders():
+    dots = border_paths(resolve_paper({"width": 100, "height": 80, "margin": 10,
+                                       "border": {"style": "dotted", "dot_spacing": 4}}))
+    assert len(dots) == pytest.approx(2 * (90 + 70) / 4, abs=8)
+    assert all(np.hypot(*(d[1] - d[0])) < 0.02 for d in dots)           # a dot is a tiny segment
+    dashes = border_paths(resolve_paper({"width": 100, "height": 80, "margin": 10,
+                                         "border": {"style": "striped", "dash": 6, "dash_gap": 3}}))
+    lens = [np.hypot(*(d[1] - d[0])) for d in dashes]
+    assert max(lens) <= 6 + 1e-9 and min(lens) > 3 and len(dashes) > 20
+
+
+def test_border_svg_shares_layer_with_pen_and_skips_when_none():
+    cfg = _cfg_margin()
+    cfg["canvas"]["border"]["pen"] = "k"            # same pen name as species "a"? species default pen is black
+    svg = to_svg(run(cfg))
+    assert svg.count('data-border="single"') == 1 and 'inkscape:label="k"' in svg
+    cfg["species"][0]["pen"] = "k"
+    assert to_svg(run(cfg)).count('inkscape:groupmode="layer"') == 1   # merged into one pen layer
+    cfg["canvas"]["border"]["style"] = "none"
+    assert "data-border" not in to_svg(run(cfg))

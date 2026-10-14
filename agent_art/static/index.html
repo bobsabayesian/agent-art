@@ -1,0 +1,587 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>agent-art</title>
+<style>
+  :root { --bg:#f4f3ef; --panel:#fff; --ink:#1d1d1f; --mute:#6b6b70; --line:#dcdad3; --accent:#2b5fd9; --err:#b3261e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#17171a; --panel:#222226; --ink:#ececee; --mute:#98989f; --line:#38383e; --accent:#7aa2ff; --err:#ff8a80; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:13px/1.4 system-ui, sans-serif; background:var(--bg); color:var(--ink); height:100vh; display:flex; }
+  aside { width:420px; min-width:320px; overflow-y:auto; padding:12px; border-right:1px solid var(--line); background:var(--bg); }
+  main { flex:1; display:flex; flex-direction:column; min-width:0; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--mute); margin:18px 0 6px; display:flex; align-items:center; gap:8px; }
+  h2 button { margin-left:auto; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px; margin-bottom:10px; }
+  .row { display:flex; align-items:center; gap:6px; margin:4px 0; }
+  .row > label { width:110px; color:var(--mute); flex:none; }
+  .row input[type=number], .row input[type=text], .row select { flex:1; min-width:0; }
+  input, select, button, textarea { font:inherit; color:inherit; background:var(--bg); border:1px solid var(--line); border-radius:5px; padding:3px 6px; }
+  button { cursor:pointer; background:var(--panel); }
+  button:hover { border-color:var(--accent); }
+  button.primary { background:var(--accent); color:#fff; border-color:var(--accent); }
+  input[type=range] { flex:1; min-width:0; padding:0; accent-color:var(--accent); }
+  input[type=color] { padding:0; width:30px; height:24px; }
+  .val { width:78px; text-align:right; font-variant-numeric:tabular-nums; color:var(--mute); font-size:11px; flex:none; }
+  details { margin:4px 0; } summary { cursor:pointer; color:var(--mute); }
+  .sp-head { display:flex; gap:6px; align-items:center; margin-bottom:6px; }
+  .sp-head input[type=text] { flex:1; min-width:0; font-weight:600; }
+  .thumb { width:96px; height:96px; flex:none; background:#fff; border:1px solid var(--line); border-radius:6px; overflow:hidden; }
+  .thumb svg { width:100%; height:100%; display:block; }
+  .sp-top { display:flex; gap:8px; }
+  .sp-top > div:first-child { flex:1; min-width:0; }
+  .goals { display:flex; flex-wrap:wrap; gap:2px 8px; margin:4px 0; }
+  .goals label { display:flex; gap:3px; align-items:center; color:var(--ink); }
+  .spark { width:100%; height:26px; display:block; }
+  .meta { color:var(--mute); font-size:11px; }
+  #bar { display:flex; gap:8px; align-items:center; padding:8px 12px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  #status { color:var(--mute); flex:1; min-width:120px; }
+  #status.err { color:var(--err); white-space:pre-wrap; }
+  #paper { flex:1; padding:16px; overflow:auto; display:flex; align-items:center; justify-content:center; min-height:0; }
+  #paper .sheet { background:#fff; box-shadow:0 2px 14px #0003; display:flex; flex:none; }
+  #paper svg { width:100%; height:100%; display:block; }
+  #legend { display:flex; gap:12px; padding:6px 12px; border-top:1px solid var(--line); flex-wrap:wrap; font-size:12px; }
+  .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:4px; vertical-align:-1px; }
+  .busy { opacity:.55; }
+</style>
+</head>
+<body>
+<aside id="side"></aside>
+<main>
+  <div id="bar">
+    <button class="primary" id="btn-run">Regenerate</button>
+    <label><input type="checkbox" id="auto" checked> auto</label>
+    <button id="btn-seed">New seed</button>
+    <select id="examples"><option value="">Load example…</option></select>
+    <button id="btn-refresh" title="Refetch live signals ignoring the cache">Refresh data</button>
+    <button id="btn-dl">Download SVG</button>
+    <button id="btn-cfg">Download config</button>
+    <label class="meta" style="cursor:pointer">Load config <input type="file" id="file" accept=".json,.yaml,.yml" hidden></label>
+    <span id="status"></span>
+  </div>
+  <div id="paper"><div class="sheet" id="sheet"></div></div>
+  <div id="legend"></div>
+</main>
+
+<script>
+"use strict";
+const $ = (s, el = document) => el.querySelector(s);
+const el = (tag, attrs = {}, ...kids) => {
+  const e = tag === "svg" ? document.createElementNS("http://www.w3.org/2000/svg", "svg") : document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") e.setAttribute("class", v); else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else if (k === "html") e.innerHTML = v; else if (v === true) e.setAttribute(k, ""); else if (v !== false && v != null) e.setAttribute(k, v);
+  }
+  for (const kid of kids.flat(Infinity)) if (kid != null) e.append(kid.nodeType ? kid : document.createTextNode(kid));
+  return e;
+};
+
+const PROVIDERS = {
+  synthetic:  [["kind","select",["walk","sine","noise"]],["seed","number"],["period","number"],["n","number"],["label","text"]],
+  open_meteo: [["lat","number"],["lon","number"],["variable","select",["temperature_2m","precipitation","wind_speed_10m","relative_humidity_2m","cloud_cover","surface_pressure"]],["start","text"],["end","text"],["label","text"]],
+  yahoo:      [["symbol","text"],["field","select",["close","volume","return"]],["start","text"],["end","text"],["label","text"]],
+  csv:        [["path","text"],["column","text"],["time_column","text"],["label","text"]],
+};
+const PROVIDER_DEFAULTS = {
+  synthetic: {kind:"walk", seed:1}, open_meteo: {lat:40.71, lon:-74.01, variable:"temperature_2m", start:"2026-09-01", end:"2026-09-30"},
+  yahoo: {symbol:"SPY", field:"volume", start:"2026-01-01", end:"2026-10-01"}, csv: {path:"", column:""},
+};
+const GROUPS = [
+  ["Start & preference", ["init_angle","like_x","like_y","like_total_angle"]],
+  ["Motion", ["step","momentum_decay","min_step","turn_propensity","jitter"]],
+  ["Social", ["vision","comfort_distance","affinity_same","affinity_other","social_strength"]],
+  ["Goal tuning", ["goal_size","goal_strength"]],
+  ["Look", ["thickness"]],
+];
+const PALETTE = ["#111111","#c0392b","#1f4e9c","#1e8449","#b9770e","#7d3c98","#117a8b","#d35400"];
+
+let META, state, lastResult = null, runToken = 0, runTimer = null, previewTimers = {};
+
+/* ---------- state <-> config ---------- */
+// a trait is {mean, sd}; older configs may give a number or a [lo, hi] uniform range
+const toTrait = v => Array.isArray(v) ? {mean: (v[0] + v[1]) / 2, sd: Math.abs(v[1] - v[0]) / Math.sqrt(12)}
+  : (v !== null && typeof v === "object") ? {mean: v.mean, sd: v.sd ?? 0} : {mean: v, sd: 0};
+const fromTrait = r => r.sd > 0 ? {mean: r.mean, sd: r.sd} : r.mean;
+const fmtN = x => String(Number(x.toPrecision(3)));
+
+const UNIT_MM = {mm: 1, cm: 10, in: 25.4};
+const BORDER_DEFAULTS = {style: "none", width: 0.5, gap: null, inset: null, dash: 4, dash_gap: 2, dot_spacing: 2.5, pen: "border", color: "#111111"};
+function canvasFromConfig(c) {
+  const custom = !c.size || String(c.size).toLowerCase() === "custom";
+  const b = typeof c.border === "string" ? {style: c.border} : (c.border || {});
+  return {
+    size: custom ? "custom" : String(c.size).toLowerCase().replace(/[ -]/g, "_"),
+    orientation: c.orientation ?? "landscape", unit: c.unit ?? "mm",
+    width: c.width ?? 297 / UNIT_MM[c.unit ?? "mm"], height: c.height ?? 210 / UNIT_MM[c.unit ?? "mm"],
+    margin: c.margin ?? 10 / UNIT_MM[c.unit ?? "mm"], border: {...BORDER_DEFAULTS, ...b},
+  };
+}
+function canvasToConfig(c) {
+  const o = {size: c.size, unit: c.unit, margin: c.margin};
+  if (c.size === "custom") { o.width = c.width; o.height = c.height; } else o.orientation = c.orientation;
+  const b = c.border;
+  if (b.style !== "none") {
+    o.border = {style: b.style, width: b.width, pen: b.pen, color: b.color};
+    if (b.inset !== null && b.inset !== "") o.border.inset = b.inset;
+    if (b.style === "double" && b.gap !== null && b.gap !== "") o.border.gap = b.gap;
+    if (b.style === "dotted") o.border.dot_spacing = b.dot_spacing;
+    if (b.style === "striped") { o.border.dash = b.dash; o.border.dash_gap = b.dash_gap; }
+  }
+  return o;
+}
+function stateFromConfig(cfg) {
+  const s = {
+    seed: cfg.seed ?? 0, agents: cfg.agents ?? 200,
+    canvas: canvasFromConfig(cfg.canvas || {}),
+    energy_range: cfg.energy_range ?? [50, 400], boundary: cfg.boundary ?? "reflect",
+    signals: JSON.parse(JSON.stringify(cfg.signals || {})),
+    bind: {x: null, y: null, energy: null}, species: [], modulate: [], walk: [],
+  };
+  for (const r of ["x","y","energy"]) {
+    const b = (cfg.bind || {})[r];
+    if (b) s.bind[r] = {signal: b.signal, scale: b.scale ?? "linear", invert: !!b.invert, range: b.range ?? null};
+  }
+  for (const [trait, b] of Object.entries(cfg.modulate || {}))
+    s.modulate.push({trait, signal: b.signal, scale: b.scale ?? "linear", invert: !!b.invert,
+                     span: b.span ? [...b.span] : [META.traits[trait].min, META.traits[trait].max], species: [...(b.species || [])]});
+  for (const b of cfg.walk || [])
+    s.walk.push({signal: b.signal, target: b.target, gain: b.gain ?? 1, window: b.window ?? 0.15, start: b.start ?? "drop",
+                 scale: b.scale ?? "linear", invert: !!b.invert, species: [...(b.species || [])]});
+  for (const sp of cfg.species || []) s.species.push(speciesFromConfig(sp));
+  if (!s.species.length) s.species.push(newSpecies());
+  return s;
+}
+function speciesFromConfig(sp) {
+  const o = {name: sp.name, pen: sp.pen ?? "black", color: sp.color ?? "#000000", weight: sp.weight ?? 1,
+             goal: sp.goal == null ? [] : (typeof sp.goal === "string" ? [sp.goal] : [...sp.goal]), traits: {}};
+  for (const [k, m] of Object.entries(META.traits)) o.traits[k] = sp[k] !== undefined ? toTrait(sp[k]) : {...m.default};
+  return o;
+}
+function newSpecies() {
+  const i = (state?.species.length ?? 0);
+  const color = PALETTE[i % PALETTE.length];
+  return speciesFromConfig({name: `species ${i + 1}`, pen: `pen${i + 1}`, color});
+}
+function speciesToConfig(sp) {
+  const o = {name: sp.name, pen: sp.pen, color: sp.color, weight: sp.weight};
+  for (const [k, r] of Object.entries(sp.traits)) o[k] = fromTrait(r);
+  if (sp.goal.length) o.goal = sp.goal.length === 1 ? sp.goal[0] : sp.goal;
+  return o;
+}
+function configFromState() {
+  const bind = {};
+  for (const [r, b] of Object.entries(state.bind)) if (b && b.signal in state.signals) {
+    bind[r] = {signal: b.signal, scale: b.scale, invert: b.invert};
+    if (b.range) bind[r].range = b.range;
+  }
+  const cfg = JSON.parse(JSON.stringify({
+    seed: state.seed, agents: state.agents, canvas: canvasToConfig(state.canvas), energy_range: state.energy_range,
+    boundary: state.boundary, signals: state.signals, bind,
+  }));
+  cfg.species = state.species.map(speciesToConfig);
+  const withSpecies = (o, m) => { if (m.species.length) o.species = [...m.species]; return o; };
+  const mod = {};
+  for (const m of state.modulate) if (m.signal in state.signals)
+    mod[m.trait] = withSpecies({signal: m.signal, scale: m.scale, invert: m.invert, span: [m.span[0], m.span[1]]}, m);
+  if (Object.keys(mod).length) cfg.modulate = mod;
+  const walk = state.walk.filter(w => w.signal in state.signals)
+    .map(w => withSpecies({signal: w.signal, target: w.target, gain: w.gain, window: w.window, start: w.start, scale: w.scale, invert: w.invert}, w));
+  if (walk.length) cfg.walk = walk;
+  return cfg;
+}
+
+/* ---------- running ---------- */
+function schedule(delay = 350) {
+  if (!$("#auto").checked) return;
+  clearTimeout(runTimer); runTimer = setTimeout(() => run(false), delay);
+}
+async function post(url, body) {
+  const r = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+async function run(refresh) {
+  const token = ++runToken, status = $("#status");
+  status.className = ""; status.textContent = "generating…"; $("#sheet").classList.add("busy");
+  try {
+    const res = await post("/api/run", {config: configFromState(), refresh: !!refresh});
+    if (token !== runToken) return;
+    lastResult = res; showResult(res);
+    status.textContent = `${state.agents} agents in ${res.seconds}s · x=${res.labels.x} · y=${res.labels.y} · energy=${res.labels.energy}`;
+  } catch (e) {
+    if (token !== runToken) return;
+    status.className = "err"; status.textContent = e.message;
+  } finally { if (token === runToken) $("#sheet").classList.remove("busy"); }
+}
+function showResult(res) {
+  const sheet = $("#sheet");
+  sheet.innerHTML = res.svg;
+  paperDims = res.paper;
+  const pt = $("#paper-info");
+  if (pt) pt.textContent = `${fmtN(res.paper.width)} × ${fmtN(res.paper.height)} mm  (${fmtN(res.paper.width / 25.4)} × ${fmtN(res.paper.height / 25.4)} in)`;
+  const svg = sheet.querySelector("svg");
+  svg.removeAttribute("width"); svg.removeAttribute("height");
+  fitSheet();
+  const lg = $("#legend"); lg.innerHTML = "";
+  for (const sp of state.species) lg.append(el("span", {}, el("span", {class: "dot", style: `background:${sp.color}`}), `${sp.name}: ${res.counts[sp.name] ?? 0}`));
+  document.querySelectorAll("[data-spark]").forEach(c => drawSpark(c, res.series[c.dataset.spark]));
+  document.querySelectorAll("[data-sparkmeta]").forEach(m => {
+    const s = res.series[m.dataset.sparkmeta];
+    m.textContent = s ? `${s.n} pts · ${s.first} → ${s.last}` : "";
+  });
+}
+let paperDims = {width: 297, height: 210};
+function fitSheet() {
+  const p = $("#paper"), w = p.clientWidth - 32, h = p.clientHeight - 32;
+  const k = Math.max(Math.min(w / paperDims.width, h / paperDims.height), 0.1);
+  $("#sheet").style.width = paperDims.width * k + "px";
+  $("#sheet").style.height = paperDims.height * k + "px";
+}
+addEventListener("resize", () => state && fitSheet());
+function highlight(name) {
+  document.querySelectorAll("#sheet path").forEach(p => {
+    p.style.opacity = name == null || p.dataset.species === name ? "" : "0.08";
+  });
+}
+function drawSpark(svg, s) {
+  svg.innerHTML = "";
+  if (!s) return;
+  const v = s.values, lo = Math.min(...v), hi = Math.max(...v), W = 300, H = 26;
+  const pts = v.map((y, i) => `${(i / (v.length - 1 || 1)) * W},${hi === lo ? H / 2 : H - 2 - ((y - lo) / (hi - lo)) * (H - 4)}`).join(" ");
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.setAttribute("preserveAspectRatio", "none");
+  svg.innerHTML = `<polyline points="${pts}" fill="none" stroke="currentColor" stroke-width="1.2" vector-effect="non-scaling-stroke"/>`;
+}
+function previewSpecies(sp, thumb) {
+  clearTimeout(previewTimers[sp._id]);
+  previewTimers[sp._id] = setTimeout(async () => {
+    try {
+      const r = await post("/api/preview", {species: speciesToConfig(sp), energy_range: state.energy_range});
+      thumb.innerHTML = r.svg;
+      const svg = thumb.querySelector("svg"); svg.removeAttribute("width"); svg.removeAttribute("height");
+    } catch (e) { thumb.textContent = "!"; thumb.title = e.message; }
+  }, 450);
+}
+
+/* ---------- UI builders ---------- */
+function numRow(label, obj, key, opts = {}) {
+  const inp = el("input", {type: "number", value: obj[key], step: opts.step ?? "any", min: opts.min, max: opts.max});
+  inp.addEventListener("input", () => { if (inp.value !== "") { obj[key] = Number(inp.value); opts.onChange?.(); schedule(); } });
+  return el("div", {class: "row"}, el("label", {}, label), inp);
+}
+function selRow(label, options, value, onChange) {
+  const s = el("select", {}, options.map(o => {
+    const [v, t] = Array.isArray(o) ? o : [o, o];
+    return el("option", {value: v, ...(v === value ? {selected: true} : {})}, t);
+  }));
+  s.addEventListener("change", () => onChange(s.value));
+  return el("div", {class: "row"}, el("label", {}, label), s);
+}
+function rangeRow(sp, key, thumb) {
+  const m = META.traits[key], r = sp.traits[key];   // r = {mean, sd}
+  const modulated = state.modulate.some(x => x.trait === key && (!x.species.length || x.species.includes(sp.name)));
+  const mean = el("input", {type: "range", min: m.min, max: m.max, step: m.step, value: r.mean, title: "mean: where agents tend to land"});
+  const sd = el("input", {type: "range", min: 0, max: m.sd_max, step: m.step, value: r.sd, title: "spread (standard deviation): 0 = every agent identical, high = anywhere"});
+  const val = el("span", {class: "val"});
+  const fmt = () => { val.textContent = r.sd > 0 ? `${fmtN(r.mean)} ± ${fmtN(r.sd)}` : fmtN(r.mean); };
+  const upd = () => { r.mean = Number(mean.value); r.sd = Number(sd.value); fmt(); previewSpecies(sp, thumb); schedule(); };
+  mean.addEventListener("input", upd); sd.addEventListener("input", upd); fmt();
+  return el("div", {class: "row"},
+    el("label", {title: modulated ? "set per agent by a signal (see Modulate traits); these sliders are overridden" : key},
+      key.replace(/_/g, " ") + (modulated ? " ⇄" : "")), mean, sd, val);
+}
+function speciesCard(sp, idx) {
+  sp._id ??= Math.random().toString(36).slice(2);
+  const thumb = el("div", {class: "thumb"});
+  const refresh = () => { previewSpecies(sp, thumb); schedule(); };
+  const name = el("input", {type: "text", value: sp.name});
+  name.addEventListener("change", () => {
+    const old = sp.name; sp.name = name.value;
+    for (const o of [...state.modulate, ...state.walk]) o.species = o.species.map(n => n === old ? sp.name : n);
+    renderSide(); schedule(0);
+  });
+  const color = el("input", {type: "color", value: sp.color});
+  color.addEventListener("input", () => { sp.color = color.value; refresh(); });
+  const pen = el("input", {type: "text", value: sp.pen, style: "width:80px", title: "pen / SVG layer name"});
+  pen.addEventListener("change", () => { sp.pen = pen.value; schedule(); });
+  const weight = el("input", {type: "range", min: 0, max: 10, step: 0.5, value: sp.weight});
+  const wv = el("span", {class: "val", style: "width:40px"}, sp.weight);
+  weight.addEventListener("input", () => { sp.weight = Number(weight.value); wv.textContent = sp.weight; schedule(); });
+
+  const goals = el("div", {class: "goals"}, META.goals.map(g => {
+    const cb = el("input", {type: "checkbox", ...(sp.goal.includes(g) ? {checked: true} : {})});
+    cb.addEventListener("change", () => { sp.goal = cb.checked ? [...sp.goal, g] : sp.goal.filter(x => x !== g); refresh(); });
+    return el("label", {}, cb, g);
+  }));
+
+  const card = el("div", {class: "card"},
+    el("div", {class: "sp-head"}, color, name, pen,
+      el("button", {title: "duplicate species", onclick: () => { const c = JSON.parse(JSON.stringify(sp)); delete c._id; c.name += " copy"; state.species.splice(idx + 1, 0, c); renderSide(); schedule(0); }}, "copy"),
+      el("button", {title: "delete", onclick: () => {
+        if (state.species.length > 1) {
+          for (const o of [...state.modulate, ...state.walk]) o.species = o.species.filter(n => n !== sp.name);
+          state.species.splice(idx, 1); renderSide(); schedule(0);
+        } }}, "✕")),
+    el("div", {class: "sp-top"},
+      el("div", {},
+        el("div", {class: "row"}, el("label", {}, "weight"), weight, wv),
+        el("div", {class: "meta"}, "goal shapes (random pick; none = free walk):"), goals,
+        el("div", {class: "meta", style: "margin-top:4px"}, "trait sliders: left = mean, right = spread (std dev)")),
+      thumb),
+    GROUPS.map(([title, keys], gi) => el("details", gi < 2 ? {open: true} : {}, el("summary", {}, title), keys.map(k => rangeRow(sp, k, thumb)))));
+  card.addEventListener("mouseenter", () => highlight(sp.name));
+  card.addEventListener("mouseleave", () => highlight(null));
+  previewSpecies(sp, thumb);
+  return card;
+}
+function signalCard(name) {
+  const spec = state.signals[name];
+  const form = el("div", {});
+  const build = () => {
+    form.innerHTML = "";
+    for (const [k, type, opts] of PROVIDERS[spec.provider]) {
+      if (type === "select") form.append(selRow(k, opts, spec[k] ?? opts[0], v => { spec[k] = v; schedule(); }));
+      else {
+        const inp = el("input", {type: type === "number" ? "number" : "text", value: spec[k] ?? "", step: "any"});
+        inp.addEventListener("change", () => {
+          if (inp.value === "") delete spec[k]; else spec[k] = type === "number" ? Number(inp.value) : inp.value;
+          schedule();
+        });
+        form.append(el("div", {class: "row"}, el("label", {}, k), inp));
+      }
+    }
+  };
+  build();
+  const nm = el("input", {type: "text", value: name, style: "flex:1;font-weight:600"});
+  nm.addEventListener("change", () => renameSignal(name, nm.value.trim()));
+  const prov = el("select", {}, Object.keys(PROVIDERS).map(p => el("option", {value: p, ...(p === spec.provider ? {selected: true} : {})}, p)));
+  prov.addEventListener("change", () => {
+    for (const k of Object.keys(spec)) delete spec[k];
+    Object.assign(spec, {provider: prov.value}, PROVIDER_DEFAULTS[prov.value]); build(); schedule();
+  });
+  const spark = el("svg", {class: "spark", "data-spark": name, style: "color:var(--accent)"});
+  return el("div", {class: "card"},
+    el("div", {class: "sp-head"}, nm, prov, el("button", {onclick: () => { delete state.signals[name]; for (const b of [...Object.values(state.bind), ...state.modulate, ...state.walk]) if (b?.signal === name) b.signal = ""; renderSide(); schedule(0); }}, "✕")),
+    form, spark, el("div", {class: "meta", "data-sparkmeta": name}));
+}
+function renameSignal(old, nu) {
+  if (!nu || nu === old || nu in state.signals) { renderSide(); return; }
+  const next = {};
+  for (const [k, v] of Object.entries(state.signals)) next[k === old ? nu : k] = v;
+  state.signals = next;
+  for (const b of [...Object.values(state.bind), ...state.modulate, ...state.walk]) if (b?.signal === old) b.signal = nu;
+  renderSide(); schedule(0);
+}
+function bindCard(role, label) {
+  const b = state.bind[role];
+  const names = Object.keys(state.signals);
+  const opts = [["", "(random)"], ...names.map(n => [n, n])];
+  const body = el("div", {});
+  const sel = el("select", {}, opts.map(([v, t]) => el("option", {value: v, ...(v === (b?.signal ?? "") ? {selected: true} : {})}, t)));
+  sel.addEventListener("change", () => {
+    state.bind[role] = sel.value ? {signal: sel.value, scale: b?.scale ?? "linear", invert: !!b?.invert, range: null} : null;
+    renderSide(); schedule(0);
+  });
+  if (b) {
+    const inv = el("input", {type: "checkbox", ...(b.invert ? {checked: true} : {})});
+    inv.addEventListener("change", () => { b.invert = inv.checked; schedule(0); });
+    body.append(selRow("scale", ["linear","log","rank"], b.scale, v => { b.scale = v; schedule(0); }),
+                el("div", {class: "row"}, el("label", {}, "invert"), inv));
+  }
+  return el("div", {class: "card"}, el("div", {class: "row"}, el("label", {style: "font-weight:600;color:var(--ink)"}, label), sel), body);
+}
+const TARGET_HELP = {
+  heading: "path leans away from its start direction as the signal moves (draws the chart)",
+  turn: "signal adds to the turn each step (value above middle curls one way, below the other)",
+  step: "signal scales step size: high = fast, low = slow",
+  jitter: "signal sets how shaky the line is (high value = more noise)",
+};
+function speciesFilter(obj) {
+  return el("div", {class: "goals", title: "which species this applies to (none checked = all)"},
+    el("span", {class: "meta"}, "species:"),
+    state.species.map(sp => {
+      const cb = el("input", {type: "checkbox", ...(obj.species.includes(sp.name) ? {checked: true} : {})});
+      cb.addEventListener("change", () => {
+        obj.species = cb.checked ? [...obj.species, sp.name] : obj.species.filter(n => n !== sp.name);
+        renderSide(); schedule(0);
+      });
+      return el("label", {}, cb, sp.name);
+    }),
+    obj.species.length ? null : el("span", {class: "meta"}, "(all)"));
+}
+function signalSelect(obj) {
+  return selRow("signal", [["", "(none)"], ...Object.keys(state.signals).map(n => [n, n])], obj.signal, v => { obj.signal = v; schedule(0); });
+}
+function scaleInvert(obj) {
+  const inv = el("input", {type: "checkbox", ...(obj.invert ? {checked: true} : {})});
+  inv.addEventListener("change", () => { obj.invert = inv.checked; schedule(0); });
+  return el("div", {class: "row"}, el("label", {}, "scale"),
+    el("select", {onchange: e => { obj.scale = e.target.value; schedule(0); }},
+      ["linear", "log", "rank"].map(v => el("option", {value: v, ...(v === obj.scale ? {selected: true} : {})}, v))),
+    el("label", {style: "width:auto"}, "invert"), inv);
+}
+function delBtn(list, idx) {
+  return el("button", {title: "remove", onclick: () => { list.splice(idx, 1); renderSide(); schedule(0); }}, "✕");
+}
+function modCard(m, idx) {
+  const span = ["lo", "hi"].map((_, j) => {
+    const inp = el("input", {type: "number", step: "any", value: m.span[j]});
+    inp.addEventListener("input", () => { if (inp.value !== "") { m.span[j] = Number(inp.value); schedule(); } });
+    return inp;
+  });
+  return el("div", {class: "card"},
+    el("div", {class: "sp-head"},
+      el("select", {style: "flex:1;font-weight:600", onchange: e => { m.trait = e.target.value; m.span = [META.traits[m.trait].min, META.traits[m.trait].max]; renderSide(); schedule(0); }},
+        Object.keys(META.traits).map(t => el("option", {value: t, ...(t === m.trait ? {selected: true} : {})}, t.replace(/_/g, " ")))),
+      delBtn(state.modulate, idx)),
+    signalSelect(m), scaleInvert(m),
+    el("div", {class: "row"}, el("label", {}, "low → high"), span[0], span[1]),
+    speciesFilter(m));
+}
+function walkCard(w, idx) {
+  const win = el("input", {type: "range", min: 0.02, max: 1, step: 0.01, value: w.window});
+  const wv = el("span", {class: "val", style: "width:50px"}, `${Math.round(w.window * 100)}%`);
+  win.addEventListener("input", () => { w.window = Number(win.value); wv.textContent = `${Math.round(w.window * 100)}%`; schedule(); });
+  const help = el("div", {class: "meta"}, TARGET_HELP[w.target]);
+  return el("div", {class: "card"},
+    el("div", {class: "sp-head"},
+      el("select", {style: "flex:1;font-weight:600", onchange: e => { w.target = e.target.value; help.textContent = TARGET_HELP[w.target]; schedule(0); }},
+        META.walk_targets.map(t => el("option", {value: t, ...(t === w.target ? {selected: true} : {})}, "drives " + t))),
+      delBtn(state.walk, idx)),
+    help, signalSelect(w), scaleInvert(w),
+    numRow("gain", w, "gain", {step: 0.1}),
+    el("div", {class: "row", title: "how much of the series one agent reads over its lifetime"}, el("label", {}, "window"), win, wv),
+    selRow("starts at", [["drop", "its drop time (slides)"], ["zero", "start of series"]], w.start, v => { w.start = v; schedule(0); }),
+    speciesFilter(w));
+}
+function paperControls() {
+  const c = state.canvas, groups = {};
+  for (const z of META.sizes) (groups[z.group] ??= []).push(z);
+  const sizeSel = el("select", {onchange: e => { c.size = e.target.value; renderSide(); schedule(0); }},
+    el("option", {value: "custom", ...(c.size === "custom" ? {selected: true} : {})}, "Custom size…"),
+    Object.entries(groups).map(([g, zs]) => el("optgroup", {label: g},
+      zs.map(z => el("option", {value: z.key, ...(z.key === c.size ? {selected: true} : {})}, z.label)))));
+  const unitSel = el("select", {onchange: e => {
+    const f = UNIT_MM[c.unit] / UNIT_MM[e.target.value];   // keep the same physical size
+    for (const k of ["width", "height", "margin"]) c[k] = Number((c[k] * f).toFixed(3));
+    c.unit = e.target.value; renderSide(); schedule(0);
+  }}, META.units.map(u => el("option", {value: u, ...(u === c.unit ? {selected: true} : {})}, u)));
+  const b = c.border;
+  const borderNum = (label, key, extra = {}) => numRow(label, b, key, {step: "any", ...extra});
+  return el("div", {},
+    el("div", {class: "row"}, el("label", {}, "paper"), sizeSel),
+    c.size === "custom"
+      ? [el("div", {class: "row"}, el("label", {}, "units"), unitSel), numRow(`width (${c.unit})`, c, "width"), numRow(`height (${c.unit})`, c, "height")]
+      : [selRow("orientation", ["landscape", "portrait"], c.orientation, v => { c.orientation = v; schedule(0); }),
+         el("div", {class: "row"}, el("label", {}, "units"), unitSel)],
+    el("div", {class: "meta", id: "paper-info", style: "margin:0 0 4px 116px"}),
+    numRow(`margin (${c.unit})`, c, "margin", {min: 0}),
+    el("div", {class: "meta", style: "margin:0 0 6px 116px"}, "agents never cross the margin"),
+    selRow("border", META.border_styles, b.style, v => { b.style = v; renderSide(); schedule(0); }),
+    b.style === "none" ? null : [
+      borderNum("line (mm)", "width", {min: 0.05}),
+      b.style === "double" ? el("div", {class: "row", title: "blank = automatic"}, el("label", {}, "line gap (mm)"), optNum(b, "gap")) : null,
+      b.style === "dotted" ? borderNum("dot spacing (mm)", "dot_spacing", {min: 0.2}) : null,
+      b.style === "striped" ? [borderNum("dash (mm)", "dash", {min: 0.2}), borderNum("gap (mm)", "dash_gap", {min: 0.2})] : null,
+      el("div", {class: "row", title: "distance from the paper edge to the border's centre line; blank = middle of the margin"},
+        el("label", {}, "inset (mm)"), optNum(b, "inset")),
+      el("div", {class: "row", title: "pen / SVG layer name; use a species' pen name to draw the border with that pen"},
+        el("label", {}, "border pen"), textInp(b, "pen"), colorInp(b, "color")),
+    ]);
+}
+function optNum(obj, key) {   // optional number: blank = automatic
+  const inp = el("input", {type: "number", step: "any", min: 0, placeholder: "auto", value: obj[key] ?? ""});
+  inp.addEventListener("input", () => { obj[key] = inp.value === "" ? null : Number(inp.value); schedule(); });
+  return inp;
+}
+function textInp(obj, key) {
+  const inp = el("input", {type: "text", value: obj[key]});
+  inp.addEventListener("change", () => { obj[key] = inp.value; schedule(); });
+  return inp;
+}
+function colorInp(obj, key) {
+  const inp = el("input", {type: "color", value: obj[key]});
+  inp.addEventListener("input", () => { obj[key] = inp.value; schedule(); });
+  return inp;
+}
+function renderSide() {
+  const side = $("#side"), top = side.scrollTop;
+  side.innerHTML = "";
+  const s = state;
+  side.append(...[
+    el("h2", {}, "Canvas & run"),
+    el("div", {class: "card"},
+      numRow("seed", s, "seed", {step: 1}), numRow("agents", s, "agents", {min: 1, max: 2000, step: 1}),
+      paperControls(),
+      numRow("energy min", s.energy_range, 0),
+      numRow("energy max", s.energy_range, 1),
+      selRow("boundary", ["reflect", "stop"], s.boundary, v => { s.boundary = v; schedule(); })),
+    el("h2", {}, "Signals", el("button", {onclick: () => {
+      let i = Object.keys(s.signals).length + 1, n; while ((n = `signal${i}`) in s.signals) i++;
+      s.signals[n] = {provider: "synthetic", ...PROVIDER_DEFAULTS.synthetic}; renderSide(); schedule(0);
+    }}, "+ add")),
+    Object.keys(s.signals).map(signalCard),
+    el("h2", {}, "Drives"),
+    bindCard("x", "x position"), bindCard("y", "y position"), bindCard("energy", "energy"),
+    el("h2", {}, "Modulate traits", el("button", {onclick: () => {
+      const t = "turn_propensity";
+      s.modulate.push({trait: t, signal: Object.keys(s.signals)[0] ?? "", scale: "linear", invert: false,
+                       span: [META.traits[t].min, META.traits[t].max], species: []}); renderSide(); schedule(0);
+    }}, "+ add")),
+    el("div", {class: "meta", style: "margin:-2px 0 6px"}, "A signal sets a species trait for each agent (by drop order), replacing its slider."),
+    s.modulate.map(modCard),
+    el("h2", {}, "Walk drivers", el("button", {onclick: () => {
+      s.walk.push({signal: Object.keys(s.signals)[0] ?? "", target: "heading", gain: 1, window: 0.15, start: "drop",
+                   scale: "linear", invert: false, species: []}); renderSide(); schedule(0);
+    }}, "+ add")),
+    el("div", {class: "meta", style: "margin:-2px 0 6px"}, "Signals read while an agent draws: its progress scrubs through a window of the series."),
+    s.walk.map(walkCard),
+    el("h2", {}, "Species", el("button", {onclick: () => { s.species.push(newSpecies()); renderSide(); schedule(0); }}, "+ add")),
+    s.species.map(speciesCard),
+  ].flat());
+  side.scrollTop = top;
+  if (lastResult) showResult(lastResult);
+}
+
+/* ---------- toolbar ---------- */
+function download(name, text, type) {
+  const a = el("a", {href: URL.createObjectURL(new Blob([text], {type})), download: name});
+  document.body.append(a); a.click(); a.remove();
+}
+$("#btn-run").onclick = () => run(false);
+$("#btn-refresh").onclick = () => run(true);
+$("#btn-seed").onclick = () => { state.seed = Math.floor(Math.random() * 100000); renderSide(); run(false); };
+$("#btn-dl").onclick = () => {
+  const svg = $("#sheet svg"); if (!svg) return;
+  const c = svg.cloneNode(true);
+  c.setAttribute("width", paperDims.width + "mm"); c.setAttribute("height", paperDims.height + "mm");
+  c.querySelectorAll("path").forEach(p => p.removeAttribute("style"));
+  download(`agent-art-${state.seed}.svg`, '<?xml version="1.0" encoding="UTF-8"?>\n' + c.outerHTML + "\n", "image/svg+xml");
+};
+$("#btn-cfg").onclick = () => download("agent-art-config.json", JSON.stringify(configFromState(), null, 2), "application/json");
+$("#file").onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  try { state = stateFromConfig(JSON.parse(await f.text())); lastResult = null; renderSide(); run(false); }
+  catch (err) { $("#status").className = "err"; $("#status").textContent = "Could not load config (JSON only here): " + err.message; }
+  e.target.value = "";
+};
+$("#examples").onchange = async e => {
+  if (!e.target.value) return;
+  const r = await fetch("/api/example/" + e.target.value);
+  state = stateFromConfig(await r.json()); lastResult = null; renderSide(); run(false);
+  e.target.value = "";
+};
+
+(async function init() {
+  META = await (await fetch("/api/meta")).json();
+  for (const n of META.examples) $("#examples").append(el("option", {value: n}, n));
+  const ex = new URLSearchParams(location.search).get("example");
+  state = stateFromConfig(await (await fetch("/api/example/" + (META.examples.includes(ex) ? ex : "demo"))).json());
+  renderSide(); run(false);
+})();
+</script>
+</body>
+</html>

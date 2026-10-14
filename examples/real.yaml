@@ -1,7 +1,7 @@
 # Live data: Open-Meteo (weather, no key) + Yahoo (stocks, no key). Results cache to .cache/.
 seed: 11
 agents: 300
-canvas: {width: 297, height: 210, margin: 10}
+canvas: {size: A3, orientation: landscape, margin: 15, border: {style: dotted, width: 0.8, dot_spacing: 3}}
 energy_range: [40, 350]
 
 signals:

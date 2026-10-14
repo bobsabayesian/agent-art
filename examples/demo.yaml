@@ -1,7 +1,7 @@
 # Offline demo (synthetic signals). See examples/real.yaml for live data.
 seed: 7
 agents: 250
-canvas: {width: 297, height: 210, margin: 10}   # mm (A4 landscape)
+canvas: {size: A4, orientation: landscape, margin: 10, border: {style: single, width: 0.5}}   # named paper size; agents stay inside the margin
 energy_range: [40, 350]                          # mm of line per agent
 boundary: reflect
 
@@ -20,38 +20,38 @@ species:
     pen: black
     color: "#111111"
     weight: 3
-    thickness: [0.2, 0.4]
-    like_x: [0.2, 0.8]
-    turn_propensity: [0.05, 0.2]
-    step: [1.5, 3]
-    momentum_decay: [0.995, 1.0]
+    thickness: {mean: 0.3, sd: 0.05774}
+    like_x: {mean: 0.5, sd: 0.1732}
+    turn_propensity: {mean: 0.125, sd: 0.0433}
+    step: {mean: 2.25, sd: 0.433}
+    momentum_decay: {mean: 0.9975, sd: 0.001443}
     affinity_same: 0.2
     affinity_other: -0.6
-    comfort_distance: [4, 8]
+    comfort_distance: {mean: 6, sd: 1.155}
     vision: 25
   - name: spiraler
     pen: red
     color: "#c0392b"
     weight: 1.5
-    thickness: [0.3, 0.6]
-    like_total_angle: [0.6, 1.0]
-    turn_propensity: [0.1, 0.25]
-    step: [2.5, 4]
-    momentum_decay: [0.985, 0.995]
+    thickness: {mean: 0.45, sd: 0.0866}
+    like_total_angle: {mean: 0.8, sd: 0.1155}
+    turn_propensity: {mean: 0.175, sd: 0.0433}
+    step: {mean: 3.25, sd: 0.433}
+    momentum_decay: {mean: 0.99, sd: 0.002887}
     min_step: 0.4
     affinity_same: 0.6
     affinity_other: 0.1
-    comfort_distance: [6, 12]
+    comfort_distance: {mean: 9, sd: 1.732}
     vision: 40
   - name: skitter
     pen: blue
     color: "#1f4e9c"
     weight: 2
     thickness: 0.2
-    like_y: [-0.8, -0.2]
-    turn_propensity: [0.3, 0.6]
-    jitter: [0.2, 0.5]
-    step: [0.8, 1.6]
+    like_y: {mean: -0.5, sd: 0.1732}
+    turn_propensity: {mean: 0.45, sd: 0.0866}
+    jitter: {mean: 0.35, sd: 0.0866}
+    step: {mean: 1.2, sd: 0.2309}
     momentum_decay: 0.998
     affinity_same: -0.4
     affinity_other: 0.5

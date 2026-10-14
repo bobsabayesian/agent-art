@@ -31,7 +31,15 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--cache-dir", default=".cache")
     r.add_argument("--simplify", type=float, default=0.0, help="RDP tolerance in mm")
     r.add_argument("--background", help="optional background fill, e.g. white")
+    sv = sub.add_parser("serve", help="launch the local web UI")
+    sv.add_argument("--host", default="127.0.0.1")
+    sv.add_argument("--port", type=int, default=8000)
+    sv.add_argument("--cache-dir", default=".cache")
     args = ap.parse_args(argv)
+
+    if args.cmd == "serve":
+        from .server import serve
+        return serve(args.host, args.port, args.cache_dir)
 
     cfg = load_config(args.config)
     if args.seed is not None:
