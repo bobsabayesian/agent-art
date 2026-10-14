@@ -44,8 +44,7 @@ def size_key(name: str) -> str:
 class Border:
     style: str = "none"
     width: float = 0.5          # line width, mm (dot diameter for dotted)
-    gap: float | None = None    # double: distance between the two lines (default max(1.5, 3 x width))
-    inset: float | None = None  # distance from paper edge to the border's centre line (default margin / 2)
+    gap: float | None = None    # double: clear space between the two lines (default max(1, 2 x width))
     dash: float = 4.0           # striped: dash length, mm
     dash_gap: float = 2.0       # striped: gap length, mm
     dot_spacing: float = 2.5    # dotted: centre-to-centre distance, mm
@@ -53,13 +52,31 @@ class Border:
     color: str = "#111111"
 
 
+def border_extent(b: Border) -> float:
+    """Total thickness of the border band, mm (outer edge to inner edge)."""
+    if b.style == "none":
+        return 0.0
+    if b.style == "double":
+        return (b.gap if b.gap is not None else max(1.0, 2 * b.width)) + 2 * b.width
+    return b.width
+
+
 @dataclass
 class Paper:
+    """Layout, outside in: paper edge | margin | border band | padding | drawing area."""
     width: float
     height: float
     margin: float
     border: Border
     label: str
+    padding: float = 0.0   # border's inner edge -> drawing area (only used when there is a border)
+
+    @property
+    def art_inset(self) -> float:
+        """Distance from the paper edge to the drawing area."""
+        if self.border.style == "none":
+            return self.margin
+        return self.margin + border_extent(self.border) + self.padding
 
 
 def resolve_paper(canvas: dict | None) -> Paper:
@@ -88,8 +105,13 @@ def resolve_paper(canvas: dict | None) -> Paper:
     if margin < 0 or 2 * margin >= min(w, h):
         raise ValueError(f"margin {margin:g} mm leaves no drawing area on a {w:g} × {h:g} mm sheet")
     border = _border(c.get("border"))
-    paper = Paper(w, h, margin, border, label)
-    border_paths(paper)  # validates that the border fits inside the margin
+    padding = float(c.get("padding", 3 / f)) * f
+    if padding < 0:
+        raise ValueError("canvas.padding must be >= 0")
+    paper = Paper(w, h, margin, border, label, padding)
+    if 2 * paper.art_inset >= min(w, h):
+        raise ValueError(f"margin + border + padding ({paper.art_inset:g} mm each side) leave no drawing area "
+                         f"on a {w:g} × {h:g} mm sheet")
     return paper
 
 
@@ -116,23 +138,18 @@ def _rect(d: float, w: float, h: float) -> np.ndarray:
 
 
 def border_paths(paper: Paper) -> list[np.ndarray]:
-    """Border as polylines in math coordinates (y up). Raises if it would leave the margin."""
-    b, w, h, m = paper.border, paper.width, paper.height, paper.margin
+    """Border as polylines in math coordinates (y up). Its outer edge sits exactly on the margin line."""
+    b, w, h = paper.border, paper.width, paper.height
     if b.style == "none":
         return []
-    d = m / 2 if b.inset is None else b.inset
-    gap = b.gap if b.gap is not None else max(1.5, 3 * b.width)
-    half = (gap + b.width) / 2 if b.style == "double" else b.width / 2
-    eps = 1e-9
-    if d - half < -eps or d + half > m + eps:
-        raise ValueError(
-            f"border doesn't fit inside the {m:g} mm margin (it spans {max(d - half, 0):g}–{d + half:g} mm from the "
-            f"edge). Increase the margin or reduce border width{', gap' if b.style == 'double' else ''} / inset.")
+    ext = border_extent(b)
+    d = paper.margin + ext / 2          # centre line of the band
     if b.style == "single":
         r = _rect(d, w, h)
         return [np.vstack([r, r[:1]])]
     if b.style == "double":
-        return [np.vstack([r, r[:1]]) for r in (_rect(d - gap / 2, w, h), _rect(d + gap / 2, w, h))]
+        off = (ext - b.width) / 2          # centre of each line, from the band's centre line
+        return [np.vstack([r, r[:1]]) for r in (_rect(d - off, w, h), _rect(d + off, w, h))]
     r = _rect(d, w, h)
     out = []
     for a, c in zip(r, np.roll(r, -1, axis=0)):
@@ -141,13 +158,13 @@ def border_paths(paper: Paper) -> list[np.ndarray]:
         if b.style == "dotted":
             n = max(1, round(L / b.dot_spacing))
             for k in range(n):
-                p = a + u * (L * k / n)
-                out.append(np.array([p, p + u * 0.01]))   # a dot = a tiny segment with round caps
+                pt = a + u * (L * k / n)
+                out.append(np.array([pt, pt + u * 0.01]))   # a dot = a tiny segment with round caps
         else:  # striped
             n = max(1, round(L / (b.dash + b.dash_gap)))
             period = L / n
             dl = period * b.dash / (b.dash + b.dash_gap)
             for k in range(n):
-                s = k * period + (period - dl) / 2
-                out.append(np.array([a + u * s, a + u * (s + dl)]))
+                st = k * period + (period - dl) / 2
+                out.append(np.array([a + u * st, a + u * (st + dl)]))
     return out

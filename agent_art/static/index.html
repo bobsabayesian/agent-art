@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="agent-art-backend" content="local">
 <title>agent-art</title>
 <style>
   :root { --bg:#f4f3ef; --panel:#fff; --ink:#1d1d1f; --mute:#6b6b70; --line:#dcdad3; --accent:#2b5fd9; --err:#b3261e; }
@@ -46,6 +47,16 @@
   #legend { display:flex; gap:12px; padding:6px 12px; border-top:1px solid var(--line); flex-wrap:wrap; font-size:12px; }
   .dot { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:4px; vertical-align:-1px; }
   .busy { opacity:.55; }
+  #session-ui { display:flex; gap:8px; align-items:center; }
+  #session-ui[hidden], #history[hidden] { display:none; }
+  #session-chip { font:11px ui-monospace, monospace; color:var(--mute); }
+  #save-note { font-size:11px; color:var(--mute); }
+  #history { position:absolute; right:12px; top:52px; width:400px; max-height:70vh; overflow:auto; z-index:5;
+             background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px; box-shadow:0 6px 24px #0004; }
+  #history .item { display:flex; gap:6px; align-items:center; padding:3px 0; border-top:1px solid var(--line); font-size:12px; }
+  #history .item .when { flex:1; min-width:0; }
+  #history .badge { font-size:10px; padding:0 5px; border:1px solid var(--line); border-radius:8px; color:var(--mute); }
+  main { position:relative; }
 </style>
 </head>
 <body>
@@ -60,8 +71,15 @@
     <button id="btn-dl">Download SVG</button>
     <button id="btn-cfg">Download config</button>
     <label class="meta" style="cursor:pointer">Load config <input type="file" id="file" accept=".json,.yaml,.yml" hidden></label>
+    <span id="session-ui" hidden>
+      <button id="btn-save" title="Save the current config + SVG to R2 now">Save</button>
+      <label title="Save the config + SVG once you stop changing things"><input type="checkbox" id="autosave" checked> autosave</label>
+      <button id="btn-history">History</button>
+      <button id="session-chip" title="Session id: click to copy; shift-click for a new session"></button>
+    </span>
     <span id="status"></span>
   </div>
+  <div id="history" hidden></div>
   <div id="paper"><div class="sheet" id="sheet"></div></div>
   <div id="legend"></div>
 </main>
@@ -84,6 +102,7 @@ const PROVIDERS = {
   open_meteo: [["lat","number"],["lon","number"],["variable","select",["temperature_2m","precipitation","wind_speed_10m","relative_humidity_2m","cloud_cover","surface_pressure"]],["start","text"],["end","text"],["label","text"]],
   yahoo:      [["symbol","text"],["field","select",["close","volume","return"]],["start","text"],["end","text"],["label","text"]],
   csv:        [["path","text"],["column","text"],["time_column","text"],["label","text"]],
+  inline:     [["label","text"]],   // values carried in the config (uploaded CSV columns)
 };
 const PROVIDER_DEFAULTS = {
   synthetic: {kind:"walk", seed:1}, open_meteo: {lat:40.71, lon:-74.01, variable:"temperature_2m", start:"2026-09-01", end:"2026-09-30"},
@@ -108,7 +127,7 @@ const fromTrait = r => r.sd > 0 ? {mean: r.mean, sd: r.sd} : r.mean;
 const fmtN = x => String(Number(x.toPrecision(3)));
 
 const UNIT_MM = {mm: 1, cm: 10, in: 25.4};
-const BORDER_DEFAULTS = {style: "none", width: 0.5, gap: null, inset: null, dash: 4, dash_gap: 2, dot_spacing: 2.5, pen: "border", color: "#111111"};
+const BORDER_DEFAULTS = {style: "none", width: 0.5, gap: null, dash: 4, dash_gap: 2, dot_spacing: 2.5, pen: "border", color: "#111111"};
 function canvasFromConfig(c) {
   const custom = !c.size || String(c.size).toLowerCase() === "custom";
   const b = typeof c.border === "string" ? {style: c.border} : (c.border || {});
@@ -116,16 +135,16 @@ function canvasFromConfig(c) {
     size: custom ? "custom" : String(c.size).toLowerCase().replace(/[ -]/g, "_"),
     orientation: c.orientation ?? "landscape", unit: c.unit ?? "mm",
     width: c.width ?? 297 / UNIT_MM[c.unit ?? "mm"], height: c.height ?? 210 / UNIT_MM[c.unit ?? "mm"],
-    margin: c.margin ?? 10 / UNIT_MM[c.unit ?? "mm"], border: {...BORDER_DEFAULTS, ...b},
+    margin: c.margin ?? 10 / UNIT_MM[c.unit ?? "mm"], padding: c.padding ?? 3 / UNIT_MM[c.unit ?? "mm"], border: {...BORDER_DEFAULTS, ...b},
   };
 }
 function canvasToConfig(c) {
   const o = {size: c.size, unit: c.unit, margin: c.margin};
+  if (c.border.style !== "none") o.padding = c.padding;
   if (c.size === "custom") { o.width = c.width; o.height = c.height; } else o.orientation = c.orientation;
   const b = c.border;
   if (b.style !== "none") {
     o.border = {style: b.style, width: b.width, pen: b.pen, color: b.color};
-    if (b.inset !== null && b.inset !== "") o.border.inset = b.inset;
     if (b.style === "double" && b.gap !== null && b.gap !== "") o.border.gap = b.gap;
     if (b.style === "dotted") o.border.dot_spacing = b.dot_spacing;
     if (b.style === "striped") { o.border.dash = b.dash; o.border.dash_gap = b.dash_gap; }
@@ -171,9 +190,146 @@ function speciesToConfig(sp) {
   if (sp.goal.length) o.goal = sp.goal.length === 1 ? sp.goal[0] : sp.goal;
   return o;
 }
+/* ---------- uploaded CSV data files ---------- */
+let datasets = [];   // [{id, name, file, delim, rows, columns: [{name, values, times, note}]}]
+const MAX_POINTS = 5000;
+
+function parseCSVText(text) {
+  text = text.replace(/^\uFEFF/, "");
+  const first = text.split(/\r?\n/, 1)[0];
+  const delim = [",", ";", "\t", "|"].map(d => [d, first.split(d).length]).sort((a, b) => b[1] - a[1])[0][0];
+  const rows = []; let row = [], cell = "", q = false;
+  const endRow = () => { row.push(cell); cell = ""; if (row.some(c => c.trim() !== "")) rows.push(row); row = []; };
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (q) { if (ch === '"') { if (text[i + 1] === '"') { cell += '"'; i++; } else q = false; } else cell += ch; }
+    else if (ch === '"') q = true;
+    else if (ch === delim) { row.push(cell); cell = ""; }
+    else if (ch === "\n" || ch === "\r") { if (ch === "\r" && text[i + 1] === "\n") i++; endRow(); }
+    else cell += ch;
+  }
+  if (cell !== "" || row.length) endRow();
+  return {rows, delim};
+}
+function toNum(s, delim) {
+  let t = String(s ?? "").trim().replace(/[$€£%\s]/g, "");
+  if (t === "" || /^0x/i.test(t)) return NaN;
+  if (/^-?\d{1,3}(\.\d{3})+,\d+$/.test(t)) t = t.replace(/\./g, "").replace(",", ".");   // 1.234,5
+  else if (delim !== "," && /^-?\d+,\d+$/.test(t)) t = t.replace(",", ".");                 // 1,5
+  else t = t.replace(/,/g, "");                                                              // 1,234.5
+  const v = Number(t);
+  return Number.isFinite(v) ? v : NaN;
+}
+function buildDataset(fileName, text) {
+  const {rows, delim} = parseCSVText(text);
+  if (rows.length < 3) throw new Error("need a header row and at least 2 data rows");
+  const ncol = Math.max(...rows.map(r => r.length));
+  const hasHeader = rows[0].some(c => c.trim() !== "" && Number.isNaN(toNum(c, delim)));
+  const seen = {};
+  const header = Array.from({length: ncol}, (_, i) => {
+    let n = (hasHeader ? (rows[0][i] ?? "").trim() : "") || `col${i + 1}`;
+    seen[n] = (seen[n] ?? 0) + 1;
+    return seen[n] > 1 ? `${n}_${seen[n]}` : n;
+  });
+  const data = hasHeader ? rows.slice(1) : rows;
+  const numeric = [];
+  let tcol = -1;   // first mostly-text column labels the points (dates, names)
+  for (let j = 0; j < ncol; j++) {
+    const nonEmpty = data.map(r => r[j] ?? "").filter(c => c.trim() !== "");
+    const nums = nonEmpty.filter(c => !Number.isNaN(toNum(c, delim)));
+    if (nums.length >= 2 && nums.length >= 0.8 * nonEmpty.length) numeric.push(j);
+    else if (tcol < 0 && nonEmpty.length >= 0.8 * data.length) tcol = j;
+  }
+  if (!numeric.length) throw new Error("no numeric columns found");
+  const columns = numeric.map(j => {
+    let values = [], times = [];
+    data.forEach((r, i) => {
+      const v = toNum(r[j], delim);
+      if (!Number.isNaN(v)) { values.push(v); times.push(tcol >= 0 ? (r[tcol] ?? "").trim() : String(i)); }
+    });
+    let note = "";
+    if (values.length > MAX_POINTS) {   // the simulation resamples anyway; keep requests small
+      const n = values.length, vv = [], tt = [];
+      for (let k = 0; k < MAX_POINTS; k++) {
+        const pos = k * (n - 1) / (MAX_POINTS - 1), i0 = Math.floor(pos), i1 = Math.min(i0 + 1, n - 1), f = pos - i0;
+        vv.push(values[i0] * (1 - f) + values[i1] * f); tt.push(times[Math.round(pos)]);
+      }
+      note = `downsampled from ${n} rows`; values = vv; times = tt;
+    }
+    return {name: header[j], values, times, note};
+  });
+  const base = fileName.replace(/\.[^.]+$/, "").trim() || "data";
+  return {id: Math.random().toString(36).slice(2), name: base, file: fileName, delim, rows: data.length, columns};
+}
+const colSignalName = (ds, c) => `${ds.name}.${c.name}`;
+function dsColumnMap() {
+  const m = new Map();
+  for (const ds of datasets) for (const c of ds.columns) m.set(colSignalName(ds, c), c);
+  return m;
+}
+const allSignalNames = () => [...Object.keys(state.signals), ...dsColumnMap().keys()];
+const refs = () => [...Object.values(state.bind), ...state.modulate, ...state.walk];
+function uniqueDatasetName(base) {
+  const taken = new Set([...datasets.map(d => d.name), ...Object.keys(state.signals).map(n => n.split(".")[0])]);
+  let n = base, i = 2; while (taken.has(n)) n = `${base}_${i++}`;
+  return n;
+}
+async function addDataset(file) {
+  try {
+    const ds = buildDataset(file.name, await file.text());
+    ds.name = uniqueDatasetName(ds.name);
+    datasets.push(ds); renderSide(); schedule(0);
+  } catch (e) { const st = $("#status"); st.className = "err"; st.textContent = `${file.name}: ${e.message}`; }
+}
+function datasetCard(ds) {
+  const nm = el("input", {type: "text", value: ds.name, style: "flex:1;font-weight:600"});
+  nm.addEventListener("change", () => {
+    const nu = nm.value.trim();
+    if (!nu || nu === ds.name || datasets.some(d => d.name === nu)) { nm.value = ds.name; return; }
+    for (const c of ds.columns) for (const r of refs()) if (r?.signal === colSignalName(ds, c)) r.signal = `${nu}.${c.name}`;
+    ds.name = nu; renderSide(); schedule(0);
+  });
+  const rm = el("button", {title: "remove file", onclick: () => {
+    for (const c of ds.columns) for (const r of refs()) if (r?.signal === colSignalName(ds, c)) r.signal = "";
+    datasets = datasets.filter(d => d !== ds); renderSide(); schedule(0);
+  }}, "✕");
+  return el("div", {class: "card"},
+    el("div", {class: "sp-head"}, nm, rm),
+    el("div", {class: "meta", style: "margin-bottom:4px"},
+      `${ds.file} · ${ds.rows} rows · ${ds.columns.length} numeric column${ds.columns.length === 1 ? "" : "s"} · delimiter ${ds.delim === "\t" ? "tab" : "'" + ds.delim + "'"}`),
+    ds.columns.map(c => {
+      const spark = el("svg", {class: "spark", style: "color:var(--accent);height:22px"});
+      drawSpark(spark, {values: c.values});
+      const lo = Math.min(...c.values), hi = Math.max(...c.values);
+      return el("div", {class: "row", title: [c.note, `${c.times[0]} → ${c.times[c.times.length - 1]}`].filter(Boolean).join(" · ")},
+        el("label", {style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap"}, c.name), spark,
+        el("span", {class: "val", style: "width:96px"}, `${fmtN(lo)} – ${fmtN(hi)}`));
+    }));
+}
+function dataSection() {
+  const file = el("input", {type: "file", accept: ".csv,.tsv,.txt,text/csv", multiple: true, hidden: true});
+  file.addEventListener("change", async e => { for (const f of e.target.files) await addDataset(f); e.target.value = ""; });
+  return [
+    el("h2", {}, "Data files", el("button", {onclick: () => file.click()}, "Upload CSV…")), file,
+    el("div", {class: "meta", style: "margin:-2px 0 6px"}, "Every numeric column becomes a signal you can pick in Drives, Modulate and Walk drivers. Drop files anywhere on this panel."),
+    datasets.length ? datasets.map(datasetCard) : null,
+  ];
+}
+function signalSelectEl(value, blankLabel, onChange) {
+  const opt = (v, t) => el("option", {value: v}, t ?? v);
+  const own = Object.keys(state.signals);
+  const sel = el("select", {},
+    opt("", blankLabel),
+    own.length ? el("optgroup", {label: "Signals"}, own.map(n => opt(n))) : null,
+    datasets.map(ds => el("optgroup", {label: `Data: ${ds.name}`}, ds.columns.map(c => opt(colSignalName(ds, c), c.name)))));
+  sel.value = value ?? "";
+  sel.addEventListener("change", () => onChange(sel.value));
+  return sel;
+}
 function configFromState() {
   const bind = {};
-  for (const [r, b] of Object.entries(state.bind)) if (b && b.signal in state.signals) {
+  const cols = dsColumnMap(), have = n => n in state.signals || cols.has(n);
+  for (const [r, b] of Object.entries(state.bind)) if (b && have(b.signal)) {
     bind[r] = {signal: b.signal, scale: b.scale, invert: b.invert};
     if (b.range) bind[r].range = b.range;
   }
@@ -184,12 +340,17 @@ function configFromState() {
   cfg.species = state.species.map(speciesToConfig);
   const withSpecies = (o, m) => { if (m.species.length) o.species = [...m.species]; return o; };
   const mod = {};
-  for (const m of state.modulate) if (m.signal in state.signals)
+  for (const m of state.modulate) if (have(m.signal))
     mod[m.trait] = withSpecies({signal: m.signal, scale: m.scale, invert: m.invert, span: [m.span[0], m.span[1]]}, m);
   if (Object.keys(mod).length) cfg.modulate = mod;
-  const walk = state.walk.filter(w => w.signal in state.signals)
+  const walk = state.walk.filter(w => have(w.signal))
     .map(w => withSpecies({signal: w.signal, target: w.target, gain: w.gain, window: w.window, start: w.start, scale: w.scale, invert: w.invert}, w));
   if (walk.length) cfg.walk = walk;
+  const used = new Set([...Object.values(bind).map(b => b.signal), ...Object.values(mod).map(m => m.signal), ...walk.map(w => w.signal)]);
+  for (const n of used) if (!(n in cfg.signals) && cols.has(n)) {   // uploaded columns travel inside the config
+    const c = cols.get(n);
+    cfg.signals[n] = {provider: "inline", label: n, values: c.values, times: c.times};
+  }
   return cfg;
 }
 
@@ -198,6 +359,78 @@ function schedule(delay = 350) {
   if (!$("#auto").checked) return;
   clearTimeout(runTimer); runTimer = setTimeout(() => run(false), delay);
 }
+/* ---------- backends: local Python server, or Python-in-the-browser + Cloudflare Worker ---------- */
+const WEB = document.querySelector('meta[name="agent-art-backend"]')?.content === "web";
+
+async function apiFetch(url, body) {   // GET, or POST when a body is given (Worker / local server JSON API)
+  let r;
+  try { r = await fetch(url, body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)}); }
+  catch (e) { throw new Error("network error (if you were logged out of Cloudflare Access, reload the page): " + e.message); }
+  const text = await r.text();
+  let j; try { j = JSON.parse(text); } catch { throw new Error(r.ok ? "unexpected response from server (login expired? reload the page)" : `${r.status} ${r.statusText}`); }
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+class PyClient {   // runs agent_art in a Web Worker; latest request per key wins, previews go first
+  constructor(onStatus) {
+    this.onStatus = onStatus; this.pending = new Map(); this.inflight = null; this.seq = 0;
+    this.worker = new Worker("py-worker.js", {type: "module"});
+    this.worker.onmessage = e => this.onMessage(e.data);
+    this.worker.onerror = e => onStatus({text: "Python worker error: " + (e.message || "failed to load"), error: true});
+  }
+  onMessage(m) {
+    if (m.type === "status") return this.onStatus(m);
+    const job = this.inflight;
+    if (!job || job.id !== m.id) return;
+    this.inflight = null;
+    if (m.ok) { const r = JSON.parse(m.result); r.error ? job.reject(new Error(r.error)) : job.resolve(r); }
+    else job.reject(new Error(m.error));
+    this.pump();
+  }
+  request(key, type, payload) {
+    return new Promise((resolve, reject) => {
+      this.pending.get(key)?.resolve({superseded: true});
+      this.pending.set(key, {key, type, payload, resolve, reject});
+      this.pump();
+    });
+  }
+  pump() {
+    if (this.inflight || !this.pending.size) return;
+    const next = [...this.pending.values()].find(j => j.type === "preview") ?? this.pending.values().next().value;
+    this.pending.delete(next.key);
+    next.id = ++this.seq; this.inflight = next;
+    this.worker.postMessage({id: next.id, type: next.type, payload: JSON.stringify(next.payload)});
+  }
+}
+let py = null;
+const signalCache = new Map();   // spec JSON -> Promise<series>; the Worker also caches in R2
+async function resolveSignals(cfg, refresh) {   // network signals are fetched by the Worker, then passed to Python as inline data
+  const out = {...cfg, signals: {}};
+  for (const [name, spec] of Object.entries(cfg.signals || {})) {
+    if (spec.provider === "yahoo" || spec.provider === "open_meteo") {
+      const key = JSON.stringify(spec);
+      if (refresh || !signalCache.has(key)) signalCache.set(key, apiFetch("/api/signal", {spec, refresh: !!refresh}));
+      let s;
+      try { s = await signalCache.get(key); } catch (e) { signalCache.delete(key); throw new Error(`signal "${name}": ${e.message}`); }
+      out.signals[name] = {provider: "inline", label: spec.label ?? s.label, values: s.values, times: s.times};
+    } else if (spec.provider === "csv") {
+      throw new Error(`signal "${name}": the csv provider reads a file path and isn't available here. Upload the file under Data files instead.`);
+    } else out.signals[name] = spec;
+  }
+  return out;
+}
+const api = WEB ? {
+  meta: () => fetch("meta.json").then(r => r.json()),
+  example: n => fetch(`examples/${n}.json`).then(r => r.json()),
+  run: async (cfg, refresh) => py.request("run", "run", {config: await resolveSignals(cfg, refresh)}),
+  preview: (key, body) => py.request("preview:" + key, "preview", body),
+} : {
+  meta: () => fetch("/api/meta").then(r => r.json()),
+  example: n => fetch("/api/example/" + n).then(r => r.json()),
+  run: (cfg, refresh) => post("/api/run", {config: cfg, refresh: !!refresh}),
+  preview: (key, body) => post("/api/preview", body),
+};
+
 async function post(url, body) {
   const r = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
   const j = await r.json();
@@ -208,9 +441,10 @@ async function run(refresh) {
   const token = ++runToken, status = $("#status");
   status.className = ""; status.textContent = "generating…"; $("#sheet").classList.add("busy");
   try {
-    const res = await post("/api/run", {config: configFromState(), refresh: !!refresh});
-    if (token !== runToken) return;
+    const res = await api.run(configFromState(), refresh);
+    if (res.superseded || token !== runToken) return;
     lastResult = res; showResult(res);
+    if (WEB) scheduleAutosave();
     status.textContent = `${state.agents} agents in ${res.seconds}s · x=${res.labels.x} · y=${res.labels.y} · energy=${res.labels.energy}`;
   } catch (e) {
     if (token !== runToken) return;
@@ -259,7 +493,8 @@ function previewSpecies(sp, thumb) {
   clearTimeout(previewTimers[sp._id]);
   previewTimers[sp._id] = setTimeout(async () => {
     try {
-      const r = await post("/api/preview", {species: speciesToConfig(sp), energy_range: state.energy_range});
+      const r = await api.preview(sp._id, {species: speciesToConfig(sp), energy_range: state.energy_range});
+      if (r.superseded) return;
       thumb.innerHTML = r.svg;
       const svg = thumb.querySelector("svg"); svg.removeAttribute("width"); svg.removeAttribute("height");
     } catch (e) { thumb.textContent = "!"; thumb.title = e.message; }
@@ -357,7 +592,7 @@ function signalCard(name) {
   build();
   const nm = el("input", {type: "text", value: name, style: "flex:1;font-weight:600"});
   nm.addEventListener("change", () => renameSignal(name, nm.value.trim()));
-  const prov = el("select", {}, Object.keys(PROVIDERS).map(p => el("option", {value: p, ...(p === spec.provider ? {selected: true} : {})}, p)));
+  const prov = el("select", {}, Object.keys(PROVIDERS).filter(p => p !== "inline" || spec.provider === "inline").map(p => el("option", {value: p, ...(p === spec.provider ? {selected: true} : {})}, p)));
   prov.addEventListener("change", () => {
     for (const k of Object.keys(spec)) delete spec[k];
     Object.assign(spec, {provider: prov.value}, PROVIDER_DEFAULTS[prov.value]); build(); schedule();
@@ -368,7 +603,7 @@ function signalCard(name) {
     form, spark, el("div", {class: "meta", "data-sparkmeta": name}));
 }
 function renameSignal(old, nu) {
-  if (!nu || nu === old || nu in state.signals) { renderSide(); return; }
+  if (!nu || nu === old || nu in state.signals || dsColumnMap().has(nu)) { renderSide(); return; }
   const next = {};
   for (const [k, v] of Object.entries(state.signals)) next[k === old ? nu : k] = v;
   state.signals = next;
@@ -377,12 +612,9 @@ function renameSignal(old, nu) {
 }
 function bindCard(role, label) {
   const b = state.bind[role];
-  const names = Object.keys(state.signals);
-  const opts = [["", "(random)"], ...names.map(n => [n, n])];
   const body = el("div", {});
-  const sel = el("select", {}, opts.map(([v, t]) => el("option", {value: v, ...(v === (b?.signal ?? "") ? {selected: true} : {})}, t)));
-  sel.addEventListener("change", () => {
-    state.bind[role] = sel.value ? {signal: sel.value, scale: b?.scale ?? "linear", invert: !!b?.invert, range: null} : null;
+  const sel = signalSelectEl(b?.signal ?? "", "(random)", v => {
+    state.bind[role] = v ? {signal: v, scale: b?.scale ?? "linear", invert: !!b?.invert, range: null} : null;
     renderSide(); schedule(0);
   });
   if (b) {
@@ -413,7 +645,7 @@ function speciesFilter(obj) {
     obj.species.length ? null : el("span", {class: "meta"}, "(all)"));
 }
 function signalSelect(obj) {
-  return selRow("signal", [["", "(none)"], ...Object.keys(state.signals).map(n => [n, n])], obj.signal, v => { obj.signal = v; schedule(0); });
+  return el("div", {class: "row"}, el("label", {}, "signal"), signalSelectEl(obj.signal, "(none)", v => { obj.signal = v; schedule(0); }));
 }
 function scaleInvert(obj) {
   const inv = el("input", {type: "checkbox", ...(obj.invert ? {checked: true} : {})});
@@ -466,7 +698,7 @@ function paperControls() {
       zs.map(z => el("option", {value: z.key, ...(z.key === c.size ? {selected: true} : {})}, z.label)))));
   const unitSel = el("select", {onchange: e => {
     const f = UNIT_MM[c.unit] / UNIT_MM[e.target.value];   // keep the same physical size
-    for (const k of ["width", "height", "margin"]) c[k] = Number((c[k] * f).toFixed(3));
+    for (const k of ["width", "height", "margin", "padding"]) c[k] = Number((c[k] * f).toFixed(3));
     c.unit = e.target.value; renderSide(); schedule(0);
   }}, META.units.map(u => el("option", {value: u, ...(u === c.unit ? {selected: true} : {})}, u)));
   const b = c.border;
@@ -479,15 +711,15 @@ function paperControls() {
          el("div", {class: "row"}, el("label", {}, "units"), unitSel)],
     el("div", {class: "meta", id: "paper-info", style: "margin:0 0 4px 116px"}),
     numRow(`margin (${c.unit})`, c, "margin", {min: 0}),
-    el("div", {class: "meta", style: "margin:0 0 6px 116px"}, "agents never cross the margin"),
+    el("div", {class: "meta", style: "margin:0 0 6px 116px"}, b.style === "none" ? "paper edge to the drawing area" : "paper edge to the border"),
     selRow("border", META.border_styles, b.style, v => { b.style = v; renderSide(); schedule(0); }),
     b.style === "none" ? null : [
       borderNum("line (mm)", "width", {min: 0.05}),
-      b.style === "double" ? el("div", {class: "row", title: "blank = automatic"}, el("label", {}, "line gap (mm)"), optNum(b, "gap")) : null,
+      b.style === "double" ? el("div", {class: "row", title: "blank = automatic"}, el("label", {title: "clear space between the two lines; blank = automatic"}, "line gap (mm)"), optNum(b, "gap")) : null,
       b.style === "dotted" ? borderNum("dot spacing (mm)", "dot_spacing", {min: 0.2}) : null,
       b.style === "striped" ? [borderNum("dash (mm)", "dash", {min: 0.2}), borderNum("gap (mm)", "dash_gap", {min: 0.2})] : null,
-      el("div", {class: "row", title: "distance from the paper edge to the border's centre line; blank = middle of the margin"},
-        el("label", {}, "inset (mm)"), optNum(b, "inset")),
+      numRow(`padding (${c.unit})`, c, "padding", {min: 0}),
+      el("div", {class: "meta", style: "margin:0 0 6px 116px"}, "space between the border and the drawing"),
       el("div", {class: "row", title: "pen / SVG layer name; use a species' pen name to draw the border with that pen"},
         el("label", {}, "border pen"), textInp(b, "pen"), colorInp(b, "color")),
     ]);
@@ -519,6 +751,7 @@ function renderSide() {
       numRow("energy min", s.energy_range, 0),
       numRow("energy max", s.energy_range, 1),
       selRow("boundary", ["reflect", "stop"], s.boundary, v => { s.boundary = v; schedule(); })),
+    dataSection(),
     el("h2", {}, "Signals", el("button", {onclick: () => {
       let i = Object.keys(s.signals).length + 1, n; while ((n = `signal${i}`) in s.signals) i++;
       s.signals[n] = {provider: "synthetic", ...PROVIDER_DEFAULTS.synthetic}; renderSide(); schedule(0);
@@ -528,20 +761,20 @@ function renderSide() {
     bindCard("x", "x position"), bindCard("y", "y position"), bindCard("energy", "energy"),
     el("h2", {}, "Modulate traits", el("button", {onclick: () => {
       const t = "turn_propensity";
-      s.modulate.push({trait: t, signal: Object.keys(s.signals)[0] ?? "", scale: "linear", invert: false,
+      s.modulate.push({trait: t, signal: allSignalNames()[0] ?? "", scale: "linear", invert: false,
                        span: [META.traits[t].min, META.traits[t].max], species: []}); renderSide(); schedule(0);
     }}, "+ add")),
     el("div", {class: "meta", style: "margin:-2px 0 6px"}, "A signal sets a species trait for each agent (by drop order), replacing its slider."),
     s.modulate.map(modCard),
     el("h2", {}, "Walk drivers", el("button", {onclick: () => {
-      s.walk.push({signal: Object.keys(s.signals)[0] ?? "", target: "heading", gain: 1, window: 0.15, start: "drop",
+      s.walk.push({signal: allSignalNames()[0] ?? "", target: "heading", gain: 1, window: 0.15, start: "drop",
                    scale: "linear", invert: false, species: []}); renderSide(); schedule(0);
     }}, "+ add")),
     el("div", {class: "meta", style: "margin:-2px 0 6px"}, "Signals read while an agent draws: its progress scrubs through a window of the series."),
     s.walk.map(walkCard),
     el("h2", {}, "Species", el("button", {onclick: () => { s.species.push(newSpecies()); renderSide(); schedule(0); }}, "+ add")),
     s.species.map(speciesCard),
-  ].flat());
+  ].flat(Infinity).filter(x => x != null));
   side.scrollTop = top;
   if (lastResult) showResult(lastResult);
 }
@@ -554,14 +787,22 @@ function download(name, text, type) {
 $("#btn-run").onclick = () => run(false);
 $("#btn-refresh").onclick = () => run(true);
 $("#btn-seed").onclick = () => { state.seed = Math.floor(Math.random() * 100000); renderSide(); run(false); };
-$("#btn-dl").onclick = () => {
-  const svg = $("#sheet svg"); if (!svg) return;
+function currentSvgText() {   // the drawing as a standalone SVG file (mm units, no UI styling)
+  const svg = $("#sheet svg"); if (!svg) return null;
   const c = svg.cloneNode(true);
   c.setAttribute("width", paperDims.width + "mm"); c.setAttribute("height", paperDims.height + "mm");
   c.querySelectorAll("path").forEach(p => p.removeAttribute("style"));
-  download(`agent-art-${state.seed}.svg`, '<?xml version="1.0" encoding="UTF-8"?>\n' + c.outerHTML + "\n", "image/svg+xml");
+  return '<?xml version="1.0" encoding="UTF-8"?>\n' + c.outerHTML + "\n";
+}
+$("#btn-dl").onclick = () => {
+  const text = currentSvgText(); if (!text) return;
+  download(`agent-art-${state.seed}.svg`, text, "image/svg+xml");
+  if (WEB) saveToR2("export", true);
 };
-$("#btn-cfg").onclick = () => download("agent-art-config.json", JSON.stringify(configFromState(), null, 2), "application/json");
+$("#btn-cfg").onclick = () => {
+  download("agent-art-config.json", JSON.stringify(configFromState(), null, 2), "application/json");
+  if (WEB) saveToR2("export", false);
+};
 $("#file").onchange = async e => {
   const f = e.target.files[0]; if (!f) return;
   try { state = stateFromConfig(JSON.parse(await f.text())); lastResult = null; renderSide(); run(false); }
@@ -570,16 +811,100 @@ $("#file").onchange = async e => {
 };
 $("#examples").onchange = async e => {
   if (!e.target.value) return;
-  const r = await fetch("/api/example/" + e.target.value);
-  state = stateFromConfig(await r.json()); lastResult = null; renderSide(); run(false);
+  state = stateFromConfig(await api.example(e.target.value)); lastResult = null; renderSide(); run(false);
   e.target.value = "";
 };
 
+addEventListener("dragover", e => { if (e.dataTransfer?.types?.includes("Files")) e.preventDefault(); });
+addEventListener("drop", async e => {
+  if (!e.dataTransfer?.files?.length) return;
+  e.preventDefault();
+  for (const f of e.dataTransfer.files) await addDataset(f);
+});
+
+/* ---------- sessions: configs, SVGs and exports saved to R2 (web build only) ---------- */
+const SESSION_KEY = "agent-art-session";
+function newSessionId() {
+  const d = new Date(), p = n => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}-${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}-${Math.random().toString(36).slice(2, 6)}`;
+}
+let sessionId = null, saveTimer = null, lastSavedKey = "";
+function initSession() {
+  try { sessionId = sessionStorage.getItem(SESSION_KEY); } catch {}
+  if (!sessionId) { sessionId = newSessionId(); try { sessionStorage.setItem(SESSION_KEY, sessionId); } catch {} }
+  $("#session-chip").textContent = sessionId;
+}
+const saveNote = (text, err = false) => { const n = $("#save-note"); n.textContent = text; n.style.color = err ? "var(--err)" : ""; };
+async function saveToR2(kind, withSvg = true) {   // kind: "run" (autosave / Save) or "export" (a download)
+  const config = configFromState(), svg = withSvg ? currentSvgText() : null;
+  if (withSvg && !svg) return;
+  const fingerprint = kind + JSON.stringify(config) + (svg ? svg.length : "");
+  if (kind === "run" && fingerprint === lastSavedKey) return saveNote("already saved");
+  try {
+    saveNote("saving…");
+    const r = await apiFetch(`/api/sessions/${sessionId}/save`, {kind, seed: state.seed, config, ...(svg ? {svg} : {})});
+    if (kind === "run") lastSavedKey = fingerprint;
+    saveNote(`saved ${new Date().toLocaleTimeString()} (${r.keys.length} file${r.keys.length === 1 ? "" : "s"})`);
+  } catch (e) { saveNote("save failed: " + e.message, true); }
+}
+function scheduleAutosave() {
+  if (!$("#autosave").checked) return;
+  clearTimeout(saveTimer); saveTimer = setTimeout(() => saveToR2("run"), 4000);   // once you stop tweaking
+}
+async function openHistory(selected = sessionId) {
+  const panel = $("#history"); panel.hidden = false; panel.textContent = "loading…";
+  try {
+    const {sessions} = await apiFetch("/api/sessions");
+    if (!sessions.includes(sessionId)) sessions.unshift(sessionId);
+    const {objects} = await apiFetch(`/api/sessions/${selected}`);
+    const groups = new Map();   // "folder/base" -> {config, svg}
+    for (const o of objects) {
+      const m = o.key.match(/^sessions\/[^/]+\/(runs|exports)\/(.+)\.(svg|config\.json)$/); if (!m) continue;
+      const g = groups.get(`${m[1]}/${m[2]}`) ?? {kind: m[1], base: m[2]};
+      g[m[3] === "svg" ? "svg" : "config"] = o.key; groups.set(`${m[1]}/${m[2]}`, g);
+    }
+    const sel = el("select", {style: "flex:1"}, sessions.map(id => el("option", {value: id, ...(id === selected ? {selected: true} : {})}, id + (id === sessionId ? "  (this session)" : ""))));
+    sel.addEventListener("change", () => openHistory(sel.value));
+    const url = k => `/api/object?key=${encodeURIComponent(k)}`;
+    const items = [...groups.values()].sort((a, b) => b.base.localeCompare(a.base)).map(g => {
+      const [ts, seed] = [g.base.split("-s")[0], g.base.split("-s")[1]];
+      const when = ts.replace(/^(\d{4}-\d\d-\d\d)T(\d\d)-(\d\d)-(\d\d).*$/, "$1 $2:$3:$4");
+      return el("div", {class: "item"},
+        el("span", {class: "when"}, `${when}  seed ${seed ?? "?"} `, el("span", {class: "badge"}, g.kind === "exports" ? "export" : "run")),
+        g.config ? el("button", {onclick: async () => {
+          try { state = stateFromConfig(await apiFetch(url(g.config))); lastResult = null; renderSide(); run(false); $("#history").hidden = true; }
+          catch (e) { saveNote("could not load: " + e.message, true); }
+        }}, "load") : null,
+        g.svg ? el("a", {href: url(g.svg), target: "_blank", rel: "noopener"}, "svg ↗") : null);
+    });
+    panel.replaceChildren(
+      el("div", {class: "row", style: "margin-top:0"}, el("strong", {}, "History"), sel, el("button", {onclick: () => { panel.hidden = true; }}, "✕")),
+      ...(items.length ? items : [el("div", {class: "meta"}, "Nothing saved in this session yet.")]));
+  } catch (e) { panel.textContent = "Could not load history: " + e.message; }
+}
+function setupWeb() {
+  $("#session-ui").hidden = false;
+  $("#status").after(el("span", {id: "save-note"}));
+  initSession();
+  $("#btn-save").onclick = () => saveToR2("run");
+  $("#btn-history").onclick = () => ($("#history").hidden ? openHistory() : ($("#history").hidden = true));
+  $("#session-chip").onclick = e => {
+    if (e.shiftKey) { sessionId = newSessionId(); try { sessionStorage.setItem(SESSION_KEY, sessionId); } catch {} lastSavedKey = ""; $("#session-chip").textContent = sessionId; saveNote("new session"); }
+    else navigator.clipboard?.writeText(sessionId).then(() => saveNote("session id copied"));
+  };
+  py = new PyClient(m => {
+    const st = $("#status");
+    if (m.error) { st.className = "err"; st.textContent = m.text; }
+    else if (m.text !== "ready" && !lastResult) { st.className = ""; st.textContent = m.text; }
+  });
+}
+
 (async function init() {
-  META = await (await fetch("/api/meta")).json();
+  if (WEB) setupWeb();
+  META = await api.meta();
   for (const n of META.examples) $("#examples").append(el("option", {value: n}, n));
   const ex = new URLSearchParams(location.search).get("example");
-  state = stateFromConfig(await (await fetch("/api/example/" + (META.examples.includes(ex) ? ex : "demo"))).json());
+  state = stateFromConfig(await api.example(META.examples.includes(ex) ? ex : "demo"));
   renderSide(); run(false);
 })();
 </script>

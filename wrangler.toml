@@ -1,0 +1,20 @@
+name = "agent-art"
+main = "worker/index.ts"
+compatibility_date = "2025-01-01"
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+run_worker_first = ["/api/*"]
+
+# Saved configs / SVGs / exports and cached stock+weather data. R2 names allow only lowercase letters,
+# numbers and hyphens, so this is "agent-art" (create it with: npx wrangler r2 bucket create agent-art).
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "agent-art"
+
+# Cloudflare Access (see README, "Deploying"): fill these in once the Access application exists.
+# Until then every /api/* call is refused (fails closed).
+[vars]
+ACCESS_TEAM_DOMAIN = ""
+ACCESS_AUD = ""

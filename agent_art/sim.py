@@ -33,7 +33,7 @@ class Result:
 
 def run(cfg: dict, cache_dir: str = ".cache", refresh: bool = False) -> Result:
     paper = resolve_paper(cfg.get("canvas"))
-    w, h, margin = paper.width, paper.height, paper.margin
+    w, h, margin = paper.width, paper.height, paper.art_inset   # margin = where the drawing area starts
     n = int(cfg.get("agents", 200))
     seed = int(cfg.get("seed", 0))
     e_lo, e_hi = cfg.get("energy_range", [50, 400])
@@ -60,7 +60,7 @@ def run(cfg: dict, cache_dir: str = ".cache", refresh: bool = False) -> Result:
         drivers = [(d.target, d.gain, d.profile(i, n)) for d in drops.walkers if d.applies(sp.name)]
         x = margin + drops.x[i] * (w - 2 * margin)
         y = margin + drops.y[i] * (h - 2 * margin)
-        inset = margin + traits["thickness"] / 2   # keep the whole stroke inside the margin
+        inset = margin + traits["thickness"] / 2   # keep the whole stroke inside the drawing area
         bounds = (inset, inset, w - inset, h - inset)
         energy = e_lo + drops.energy[i] * (e_hi - e_lo)
         path = walk(world, arng, traits, int(ids[i]), x, y, energy, boundary, bounds=bounds, drivers=drivers)

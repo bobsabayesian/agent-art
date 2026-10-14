@@ -1,0 +1,2 @@
+# Copy to .dev.vars for `npm run dev` (wrangler dev). Never deploy with this: it switches the Access check off.
+ALLOW_UNAUTHENTICATED=true

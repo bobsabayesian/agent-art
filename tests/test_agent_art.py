@@ -250,8 +250,10 @@ def test_named_sizes_orientation_units():
     {"size": "A99"}, {"size": "A4", "orientation": "sideways"}, {"unit": "ft"},
     {"width": 100, "height": 100, "margin": 60}, {"border": {"style": "wavy"}},
     {"border": {"style": "single", "bogus": 1}}, {"border": {"style": "single", "width": 0}},
-    {"width": 100, "height": 100, "margin": 2, "border": {"style": "single", "width": 3}},
-    {"width": 100, "height": 100, "margin": 4, "border": {"style": "double", "width": 1, "gap": 5}},
+    {"width": 100, "height": 100, "margin": 44, "border": {"style": "single", "width": 5}},   # no room left inside
+    {"width": 100, "height": 100, "margin": 30, "border": {"style": "double", "width": 1, "gap": 20}},
+    {"width": 100, "height": 100, "margin": 10, "padding": -1, "border": "single"},
+    {"width": 100, "height": 100, "margin": 10, "border": {"style": "single", "inset": 5}},     # removed option
 ])
 def test_bad_canvas(bad):
     with pytest.raises(ValueError):
@@ -268,7 +270,7 @@ def _cfg_margin():
 def test_nothing_drawn_outside_margin(boundary):
     res = run(_cfg_margin() | {"boundary": boundary})
     w, h, m = res.width, res.height, 15
-    lo = m + 1.2 / 2 - 1e-9
+    lo = res.paper.art_inset + 1.2 / 2 - 1e-9
     for p in res.paths:
         assert (p[:, 0] >= lo).all() and (p[:, 0] <= w - lo).all()
         assert (p[:, 1] >= lo).all() and (p[:, 1] <= h - lo).all()
@@ -288,7 +290,7 @@ def test_line_borders_are_closed_rectangles(style, expect):
     paths = border_paths(paper)
     assert len(paths) == expect and all(np.allclose(p[0], p[-1]) for p in paths)
     allp = np.vstack(paths)
-    assert allp.min() >= 0 and allp[:, 0].max() <= 100 and allp[:, 1].max() <= 80
+    assert allp.min() >= 10 and allp[:, 0].max() <= 90 and allp[:, 1].max() <= 70   # nothing in the margin
     if style == "double":  # two nested rectangles
         assert np.ptp(paths[0][:, 0]) > np.ptp(paths[1][:, 0])
 
@@ -296,7 +298,7 @@ def test_line_borders_are_closed_rectangles(style, expect):
 def test_dotted_and_striped_borders():
     dots = border_paths(resolve_paper({"width": 100, "height": 80, "margin": 10,
                                        "border": {"style": "dotted", "dot_spacing": 4}}))
-    assert len(dots) == pytest.approx(2 * (90 + 70) / 4, abs=8)
+    assert len(dots) == pytest.approx(2 * (79.5 + 59.5) / 4, abs=4)   # perimeter of the band's centre line
     assert all(np.hypot(*(d[1] - d[0])) < 0.02 for d in dots)           # a dot is a tiny segment
     dashes = border_paths(resolve_paper({"width": 100, "height": 80, "margin": 10,
                                          "border": {"style": "striped", "dash": 6, "dash_gap": 3}}))
@@ -313,3 +315,39 @@ def test_border_svg_shares_layer_with_pen_and_skips_when_none():
     assert to_svg(run(cfg)).count('inkscape:groupmode="layer"') == 1   # merged into one pen layer
     cfg["canvas"]["border"]["style"] = "none"
     assert "data-border" not in to_svg(run(cfg))
+
+
+def test_margin_is_outside_the_border_only():
+    """paper edge | margin | border | padding | drawing area -- the margin is not applied twice."""
+    paper = resolve_paper({"width": 100, "height": 80, "margin": 10, "padding": 4,
+                           "border": {"style": "double", "width": 1, "gap": 3}})
+    outer, inner = border_paths(paper)
+    assert outer[:, 0].min() - 0.5 == pytest.approx(10)          # outer edge of the band is exactly the margin
+    assert inner[:, 0].min() + 0.5 == pytest.approx(10 + 1 + 3 + 1)  # band is gap + 2 line widths wide = 5
+    assert paper.art_inset == pytest.approx(10 + 5 + 4)           # + padding
+    assert resolve_paper({"width": 100, "height": 80, "margin": 10}).art_inset == 10   # no border: art at margin
+    assert resolve_paper({"width": 100, "height": 80, "margin": 10, "padding": 9}).art_inset == 10  # padding unused
+
+
+def test_artwork_stays_inside_border_with_padding():
+    cfg = _cfg_margin()
+    cfg["canvas"] = {"size": "A5", "margin": 12, "padding": 3, "border": {"style": "single", "width": 0.6}}
+    res = run(cfg)
+    lo = 12 + 0.6 + 3 + 1.2 / 2 - 1e-9          # margin + border + padding + half the stroke
+    assert res.paper.art_inset == pytest.approx(15.6)
+    for p in res.paths:
+        assert (p[:, 0] >= lo).all() and (p[:, 0] <= res.width - lo).all()
+        assert (p[:, 1] >= lo).all() and (p[:, 1] <= res.height - lo).all()
+
+
+def test_inline_signal_drives_agents_and_validates():
+    vals = [0, 1, 4, 9, 16, 25]
+    cfg = _mod_cfg(signals={"d": {"provider": "inline", "values": vals, "label": "squares", "times": list("abcdef")}},
+                   bind={"x": {"signal": "d"}}, agents=6)
+    res = run(cfg)
+    xs = np.array([p[0, 0] for p in res.paths])
+    assert np.allclose(np.diff(xs) > 0, True) and res.drops.labels["x"] == "squares"
+    assert signals.fetch(cfg["signals"]["d"]).times == list("abcdef")
+    for bad in ({"values": [1]}, {"values": "abc"}, {"values": [1, float("nan")]}, {}):
+        with pytest.raises(ValueError):
+            signals.fetch({"provider": "inline", **bad})

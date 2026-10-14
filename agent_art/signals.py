@@ -89,8 +89,25 @@ def _csv(p: dict) -> Series:
                   [r[tcol] if tcol else str(i) for i, r in enumerate(rows)])
 
 
-PROVIDERS = {"synthetic": _synthetic, "open_meteo": _open_meteo, "yahoo": _yahoo, "csv": _csv}
-_OFFLINE = {"synthetic", "csv"}  # no need to cache
+MAX_INLINE = 200_000
+
+
+def _inline(p: dict) -> Series:
+    """Values carried inside the config itself (used by the UI for uploaded CSV columns)."""
+    vals = p.get("values")
+    if not isinstance(vals, list) or len(vals) < 2:
+        raise ValueError("inline signal needs a 'values' list with at least 2 numbers")
+    if len(vals) > MAX_INLINE:
+        raise ValueError(f"inline signal too long ({len(vals)} > {MAX_INLINE} values)")
+    values = [float(v) for v in vals]
+    if not all(np.isfinite(values)):
+        raise ValueError("inline signal values must be finite numbers")
+    times = [str(t) for t in p["times"]] if p.get("times") and len(p["times"]) == len(values) else [str(i) for i in range(len(values))]
+    return Series(p.get("label", "inline"), values, times)
+
+
+PROVIDERS = {"synthetic": _synthetic, "open_meteo": _open_meteo, "yahoo": _yahoo, "csv": _csv, "inline": _inline}
+_OFFLINE = {"synthetic", "csv", "inline"}  # no need to cache
 
 
 def fetch(spec: dict, cache_dir: str | Path = ".cache", refresh: bool = False) -> Series:
